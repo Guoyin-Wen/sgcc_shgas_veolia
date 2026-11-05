@@ -426,17 +426,21 @@ class SensorUpdator:
             attrs_topic = f"home/sgcc_veolia/{object_id}/attributes"
             attrs = dict(request_body.get("attributes") or {})
             if sensorName not in self._mqtt_published:
+                # name 必须用 object_id（英文 slug）：中文 name 会被 HA 转成拼音 entity_id，
+                # 与既有实体 id（REST 时代的原名）不一致
                 config = {
-                    "name": attrs.get("friendly_name", object_id),
+                    "name": object_id,
                     "unique_id": object_id,
                     "state_topic": state_topic,
                     "value_template": "{{ value_json.state }}",
                     "json_attributes_topic": attrs_topic,
-                    "device": self._MQTT_DEVICE,
+                    # 不带 device：带 device 时 HA 会给 entity_id 强制加设备名前缀，
+                    # 与既有实体 id（REST 时代的原名）冲突，故舍弃设备归组保 id
                 }
                 for key in ("unit_of_measurement", "device_class", "state_class", "icon"):
                     if key in attrs:
                         config[key] = attrs.pop(key)
+                attrs.pop("friendly_name", None)
                 client.publish(f"homeassistant/sensor/sgcc_veolia/{object_id}/config",
                                json.dumps(config, ensure_ascii=False), retain=True, qos=1)
                 self._mqtt_published.add(sensorName)

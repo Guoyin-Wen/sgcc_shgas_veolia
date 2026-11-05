@@ -400,12 +400,6 @@ class SensorUpdator:
             logging.error(f"Home Assistant REST API 调用失败，原因是 {e}")
 
     # ── MQTT 模式：discovery + retained state，由 HA 官方 MQTT 集成注册正规实体 ──
-    _MQTT_DEVICE = {
-        "identifiers": ["sgcc_shgas_veolia"],
-        "name": "SGCC 水电气",
-        "manufacturer": "sgcc_shgas_veolia",
-    }
-
     def _mqtt(self):
         if self._mqtt_client is None:
             import paho.mqtt.client as mqtt
@@ -426,16 +420,19 @@ class SensorUpdator:
             attrs_topic = f"home/sgcc_veolia/{object_id}/attributes"
             attrs = dict(request_body.get("attributes") or {})
             if sensorName not in self._mqtt_published:
-                # name 必须用 object_id（英文 slug）：中文 name 会被 HA 转成拼音 entity_id，
-                # 与既有实体 id（REST 时代的原名）不一致
+                # name 必须用 object_id（英文 slug）：中文 name 会被 HA 转成拼音 entity_id。
+                # 带 device 时 HA 会强制给 entity_id 加设备名前缀（sgcc_shgas_veolia_<name>）
                 config = {
                     "name": object_id,
                     "unique_id": object_id,
                     "state_topic": state_topic,
                     "value_template": "{{ value_json.state }}",
                     "json_attributes_topic": attrs_topic,
-                    # 不带 device：带 device 时 HA 会给 entity_id 强制加设备名前缀，
-                    # 与既有实体 id（REST 时代的原名）冲突，故舍弃设备归组保 id
+                    "device": {
+                        "identifiers": ["sgcc_shgas_veolia"],
+                        "name": "sgcc_shgas_veolia",
+                        "manufacturer": "sgcc_shgas_veolia",
+                    },
                 }
                 for key in ("unit_of_measurement", "device_class", "state_class", "icon"):
                     if key in attrs:

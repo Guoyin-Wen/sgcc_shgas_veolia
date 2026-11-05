@@ -387,6 +387,16 @@ class SensorUpdator:
         except Exception as e:
             logging.error(f"Home Assistant REST API 调用失败，原因是 {e}")
 
+    # 二开新增：带完整 attributes 的传感器更新（浦东威立雅表底/缴费状态等）
+    def update_attrs(self, sensorName: str, sensorState, attributes: dict):
+        request_body = {
+            "state": sensorState,
+            "unique_id": sensorName,
+            "attributes": attributes,
+        }
+        self.send_url(sensorName, request_body)
+        logging.info(f"Home Assistant 传感器 {sensorName} 状态已更新: {sensorState}")
+
     # 二开新增：上海燃气 / 浦东威立雅传感器通用的更新入口
     def update(self, sensorName: str, present_date, sensorState: float, sensorUnit: str, month=False):
         """

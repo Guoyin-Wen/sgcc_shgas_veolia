@@ -41,6 +41,8 @@ PDWLY_MONTHLY_USAGE_DIRTY_SENSOR_NAME = "sensor.last_pdwly_usage_dirty"   # 本�
 PDWLY_MONTHLY_CHARGE_TOTAL_SENSOR_NAME = "sensor.last_pdwly_charge_total"   # 本期消费
 PDWLY_MONTHLY_CHARGE_WATER_SENSOR_NAME = "sensor.last_pdwly_charge_water"   # 本期消费 生活水
 PDWLY_MONTHLY_CHARGE_DIRTY_SENSOR_NAME = "sensor.last_pdwly_charge_dirty"   # 本期消费 污水
+PDWLY_METER_READING_SENSOR_NAME = "sensor.pdwly_meter_reading"   # 本期水表读数（表底）
+PDWLY_PAY_STATUS_SENSOR_NAME = "sensor.pdwly_pay_status"   # 本期缴费状态
 
 LLM_API_KEY = os.getenv('LLM_API_KEY', '').strip()
 LLM_BASE_URL = os.getenv('LLM_BASE_URL', 'https://api.siliconflow.cn/v1')

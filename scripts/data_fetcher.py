@@ -3,6 +3,7 @@ import os
 import re
 import time
 import json
+import hashlib
 import shutil
 import subprocess
 
@@ -1035,8 +1036,8 @@ class DataFetcher:
 
         try:
             # 获取上海燃气数据
-            user_id_list, month_usage_total_list, month_usage_water_list, month_usage_dirty_list, month_charge_total_list, month_charge_water_list, month_charge_dirty_list, month_list = self._get_pdwly_data()
-            return user_id_list, month_usage_total_list, month_usage_water_list, month_usage_dirty_list, month_charge_total_list, month_charge_water_list, month_charge_dirty_list, month_list
+            user_id_list, month_usage_total_list, month_usage_water_list, month_usage_dirty_list, month_charge_total_list, month_charge_water_list, month_charge_dirty_list, month_list, latest_bills, history_bills = self._get_pdwly_data()
+            return user_id_list, month_usage_total_list, month_usage_water_list, month_usage_dirty_list, month_charge_total_list, month_charge_water_list, month_charge_dirty_list, month_list, latest_bills, history_bills
         finally:
             logging.info("Fetching pdwly data successfully.")
 
@@ -1062,6 +1063,9 @@ class DataFetcher:
     def _get_pdwly_data(self):
         # 当前月份
         from datetime import datetime
+        if not self.pdwly_id:
+            logging.info("未配置 PDWLY_ID，跳过浦东威立雅水费数据获取。")
+            return [], [], [], [], [], [], [], [], {}, {}
         current_month = datetime.now().month
         year = datetime.now().year - 1
         if current_month < 10:
@@ -1074,6 +1078,8 @@ class DataFetcher:
         month_charge_water_list = []
         month_charge_dirty_list = []
         month_list = []
+        latest_bills = {}
+        history_bills = {}
         for user in eval(self.pdwly_id):
             pdwly_url = 'https://mtu.pudongwater.com/wkf/WX/GetBill?cid=' + str(
                 user) + '&kaishisj=' + start_time + '&jieshusj='
@@ -1095,6 +1101,7 @@ class DataFetcher:
                         month_charge_water_list_tmp = []
                         month_charge_dirty_list_tmp = []
                         month_list_tmp = []
+                        history_tmp = []
                         for bill in json.loads(rsp_data['data']):
                             if int(bill.get('MONTH', '')) < 10:
                                 month = '0' + str(bill.get('MONTH', ''))
@@ -1124,6 +1131,22 @@ class DataFetcher:
                             month_charge_water_list_tmp.append(str(bill.get('WATERFEE', '')))
                             month_charge_dirty_list_tmp.append(str(bill.get('DIRTYFEE', '')))
                             month_list_tmp.append(bill.get('YEAR', '') + '-' + month)
+                            history_tmp.append({
+                                'month': bill.get('YEAR', '') + '-' + month,
+                                'usage_total': str(float(bill.get('WATERNUM', '0')) + float(bill.get('DIRTYNUM', '0'))),
+                                'usage_water': bill.get('WATERNUM', ''),
+                                'usage_dirty': bill.get('DIRTYNUM', ''),
+                                'charge_total': str(float(bill.get('WATERFEE', '0')) + float(bill.get('DIRTYFEE', '0'))),
+                                'charge_water': bill.get('WATERFEE', ''),
+                                'charge_dirty': bill.get('DIRTYFEE', ''),
+                                'sumpay': bill.get('SUMPAY', ''),
+                                'meter_prev': bill.get('PREVMETERDATA', ''),
+                                'meter_curr': bill.get('METERDATA', ''),
+                                'paytime': bill.get('PAYTIME', ''),
+                                'billstatus': str(bill.get('BILLSTATUS', '')),
+                                'copymeterdate': bill.get('COPYMETERDATE', ''),
+                                'nextdate': bill.get('NEXTDATE', ''),
+                            })
                             # 插入到数据库
                             try:
                                 self.insert_data_pdwly_bill(dic)
@@ -1134,13 +1157,17 @@ class DataFetcher:
                                     f"水费数据插入失败: {str(e)}")
 
                         self.connect.close()
-                        month_usage_total_list.append(month_usage_total_list_tmp[-1])
-                        month_usage_water_list.append(month_usage_water_list_tmp[-1])
-                        month_usage_dirty_list.append(month_usage_dirty_list_tmp[-1])
-                        month_charge_total_list.append(month_charge_total_list_tmp[-1])
-                        month_charge_water_list.append(month_charge_water_list_tmp[-1])
-                        month_charge_dirty_list.append(month_charge_dirty_list_tmp[-1])
-                        month_list.append(month_list_tmp[-1])
+                        # API 返回最新账单在前，按月份取最新一期（上游原取[-1]会拿到最旧一期）
+                        latest = max(range(len(month_list_tmp)), key=lambda i: month_list_tmp[i])
+                        month_usage_total_list.append(month_usage_total_list_tmp[latest])
+                        month_usage_water_list.append(month_usage_water_list_tmp[latest])
+                        month_usage_dirty_list.append(month_usage_dirty_list_tmp[latest])
+                        month_charge_total_list.append(month_charge_total_list_tmp[latest])
+                        month_charge_water_list.append(month_charge_water_list_tmp[latest])
+                        month_charge_dirty_list.append(month_charge_dirty_list_tmp[latest])
+                        month_list.append(month_list_tmp[latest])
+                        latest_bills[user] = history_tmp[latest]
+                        history_bills[user] = history_tmp
                         logging.info(
                             f"获取用户 {user} 水费账单数据成功.")
                         attempts = 6
@@ -1154,9 +1181,12 @@ class DataFetcher:
                 time.sleep(5)  # 等待指定的时间后重试
 
         user_id_list = eval(self.pdwly_id)
-        return user_id_list, month_usage_total_list, month_usage_water_list, month_usage_dirty_list, month_charge_total_list, month_charge_water_list, month_charge_dirty_list, month_list
+        return user_id_list, month_usage_total_list, month_usage_water_list, month_usage_dirty_list, month_charge_total_list, month_charge_water_list, month_charge_dirty_list, month_list, latest_bills, history_bills
 
     def _get_shrq_data(self):
+        if not self.shrq_username:
+            logging.info("未配置 SHRQ_PHONE_NUMBER，跳过上海燃气数据获取。")
+            return [], [], [], [], []
 
         login_url = 'https://web-api.shgas.com.cn/v1/user/common/doLogin'
         img_url = 'https://web-api.shgas.com.cn/v1/thirdparty/common/img/getImgAuthCode?timestamp='
@@ -1206,13 +1236,17 @@ class DataFetcher:
 
                             time.sleep(2)
                             timestamp = int(time.time())
+                            # 上海燃气前端用 js-md5 对明文密码做纯 MD5（无盐）后提交；
+                            # .env 里也可直接配置 32 位 hex 的 md5 值（如从浏览器抓包获得），此时原样使用
+                            pwd_raw = (self.shrq_password or "").strip().strip('"').strip("'")
+                            pwd_val = pwd_raw if len(pwd_raw) == 32 and all(c in "0123456789abcdef" for c in pwd_raw.lower()) else hashlib.md5(pwd_raw.encode()).hexdigest()
                             post_data = {
                                 "imgAuthCode": img_code,
                                 "imgid": imgid,
                                 "method": "PWD",
-                                "mobile": self.shrq_username,
+                                "mobile": (self.shrq_username or "").strip().strip('"').strip("'"),
                                 "origin": "PC",
-                                "pwd": self.shrq_password,
+                                "pwd": pwd_val,
                                 "qrCode": "",
                                 "smsAuthCode": "",
                                 "timestamp": timestamp * 1000

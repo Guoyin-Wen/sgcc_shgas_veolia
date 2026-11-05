@@ -104,7 +104,7 @@ def republish_or_fetch(updator: SensorUpdator, fetcher: DataFetcher):
 def run_task(data_fetcher: DataFetcher, sensor_updator: SensorUpdator):
     # 二开新增：浦东威立雅水费数据（失败不影响国网/燃气）
     try:
-        user_id_list, month_usage_total_list, month_usage_water_list, month_usage_dirty_list, month_charge_total_list, month_charge_water_list, month_charge_dirty_list, month_list = data_fetcher.fetch_pdwly()
+        user_id_list, month_usage_total_list, month_usage_water_list, month_usage_dirty_list, month_charge_total_list, month_charge_water_list, month_charge_dirty_list, month_list, latest_bills, history_bills = data_fetcher.fetch_pdwly()
         for i in range(0, len(user_id_list)):
             profix = f"_{user_id_list[i]}" if len(user_id_list) > 1 else ""
             if month_usage_total_list[i] is not None:
@@ -125,6 +125,32 @@ def run_task(data_fetcher: DataFetcher, sensor_updator: SensorUpdator):
             if month_charge_dirty_list[i] is not None:
                 sensor_updator.update(PDWLY_MONTHLY_CHARGE_DIRTY_SENSOR_NAME + profix, month_list[i],
                                       month_charge_dirty_list[i], BALANCE_UNIT, month=True)
+            # 本期水表读数（表底）+ 近12期账单历史
+            if user_id_list[i] in latest_bills:
+                b = latest_bills[user_id_list[i]]
+                sensor_updator.update_attrs(PDWLY_METER_READING_SENSOR_NAME + profix, b.get('meter_curr', ''), {
+                    "friendly_name": f"水表读数{profix}",
+                    "unit_of_measurement": USAGE_UNIT_CUBE,
+                    "device_class": "water",
+                    "state_class": "total",
+                    "icon": "mdi:counter",
+                    "period": b.get('month', ''),
+                    "meter_prev": b.get('meter_prev', ''),
+                    "copymeterdate": b.get('copymeterdate', ''),
+                    "nextdate": b.get('nextdate', ''),
+                    "bills_last_12m": history_bills.get(user_id_list[i], []),
+                })
+                # 本期缴费状态
+                pay_status = "已缴费" if b.get('billstatus') == '1' else f"未缴费(status={b.get('billstatus', '')})"
+                sensor_updator.update_attrs(PDWLY_PAY_STATUS_SENSOR_NAME + profix, pay_status, {
+                    "friendly_name": f"水费缴费状态{profix}",
+                    "icon": "mdi:receipt-text-check",
+                    "period": b.get('month', ''),
+                    "paytime": b.get('paytime', ''),
+                    "sumpay": b.get('sumpay', ''),
+                    "charge_total": month_charge_total_list[i],
+                    "usage_total": month_usage_total_list[i],
+                })
     except Exception as e:
         logging.error(f"浦东威立雅水费数据刷新任务失败，原因是 [{e}]")
         traceback.print_exc()

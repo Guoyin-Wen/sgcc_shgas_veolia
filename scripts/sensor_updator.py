@@ -489,7 +489,7 @@ class SensorUpdator:
         # 命名历史交叉：SHRQ_BALANCE 实际承载用量(m³)、SHRQ_MONTHLY_USAGE 实际承载金额(CNY)，按单位判类型
         if sensorUnit == BALANCE_UNIT:
             icon, dc = "mdi:cash", "monetary"
-        elif "shrq" in sensorName:
+        elif sensorName.startswith("sensor.gas_"):
             icon, dc = "mdi:meter-gas", "gas"
         else:
             icon, dc = "mdi:water", "water"

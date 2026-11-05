@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timedelta
 
 import requests
@@ -15,6 +16,12 @@ class SensorUpdator:
         self.base_url = HASS_URL[:-1] if HASS_URL.endswith("/") else HASS_URL
         self.token = HASS_TOKEN
         self._init_balance_notify()
+        # 推送模式: MQTT(推荐, 经 broker+discovery 注册正规实体) / RESTFUL(HA rest 集成拉取
+        # /sensors 快照) / LEGACY(REST API 直推, 历史遗留, 不推荐)
+        self.push_mode = os.getenv("PUSH_MODE", "LEGACY").strip().upper()
+        self._mqtt_client = None
+        self._mqtt_published = set()
+        self._snapshot_lock = threading.Lock()
 
     def _init_balance_notify(self):
         push_type = os.getenv("PUSH_TYPE", "None").lower()
@@ -374,6 +381,11 @@ class SensorUpdator:
         logging.info(f"Home Assistant 传感器 {sensorName} 状态已更新: {sensorState} CNY")
 
     def send_url(self, sensorName, request_body):
+        # 三种推送模式的统一汇聚点
+        if self.push_mode == "MQTT":
+            return self._send_mqtt(sensorName, request_body)
+        if self.push_mode == "RESTFUL":
+            return self._send_snapshot(sensorName, request_body)
         headers = {
             "Content-Type": "application/json",
             "Authorization": "Bearer " + self.token,
@@ -386,6 +398,78 @@ class SensorUpdator:
             )
         except Exception as e:
             logging.error(f"Home Assistant REST API 调用失败，原因是 {e}")
+
+    # ── MQTT 模式：discovery + retained state，由 HA 官方 MQTT 集成注册正规实体 ──
+    _MQTT_DEVICE = {
+        "identifiers": ["sgcc_shgas_veolia"],
+        "name": "SGCC 水电气",
+        "manufacturer": "sgcc_shgas_veolia",
+    }
+
+    def _mqtt(self):
+        if self._mqtt_client is None:
+            import paho.mqtt.client as mqtt
+            client = mqtt.Client(client_id="sgcc_shgas_veolia")
+            user = os.getenv("MQTT_USER")
+            if user:
+                client.username_pw_set(user, os.getenv("MQTT_PASSWORD", ""))
+            client.connect(os.getenv("MQTT_HOST"), int(os.getenv("MQTT_PORT", "1883")), keepalive=60)
+            client.loop_start()
+            self._mqtt_client = client
+        return self._mqtt_client
+
+    def _send_mqtt(self, sensorName, request_body):
+        try:
+            client = self._mqtt()
+            object_id = sensorName.split(".", 1)[1] if "." in sensorName else sensorName
+            state_topic = f"home/sgcc_veolia/{object_id}/state"
+            attrs_topic = f"home/sgcc_veolia/{object_id}/attributes"
+            attrs = dict(request_body.get("attributes") or {})
+            if sensorName not in self._mqtt_published:
+                config = {
+                    "name": attrs.get("friendly_name", object_id),
+                    "unique_id": object_id,
+                    "state_topic": state_topic,
+                    "value_template": "{{ value_json.state }}",
+                    "json_attributes_topic": attrs_topic,
+                    "device": self._MQTT_DEVICE,
+                }
+                for key in ("unit_of_measurement", "device_class", "state_class", "icon"):
+                    if key in attrs:
+                        config[key] = attrs.pop(key)
+                client.publish(f"homeassistant/sensor/sgcc_veolia/{object_id}/config",
+                               json.dumps(config, ensure_ascii=False), retain=True, qos=1)
+                self._mqtt_published.add(sensorName)
+            client.publish(state_topic, json.dumps({"state": request_body.get("state")}, ensure_ascii=False),
+                           retain=True, qos=1)
+            if attrs:
+                client.publish(attrs_topic, json.dumps(attrs, ensure_ascii=False), retain=True, qos=1)
+            logging.info(f"MQTT 传感器 {sensorName} 状态已更新: {request_body.get('state')}")
+        except Exception as e:
+            logging.error(f"MQTT 发布失败（{sensorName}）: {e}")
+
+    # ── RESTFUL 模式：写本地快照，由 state_server 暴露给 HA rest 集成拉取 ──
+    def _send_snapshot(self, sensorName, request_body):
+        try:
+            path = os.path.join(get_data_dir(), "sensors_state.json")
+            with self._snapshot_lock:
+                data = {}
+                if os.path.exists(path):
+                    try:
+                        with open(path) as f:
+                            data = json.load(f)
+                    except Exception:
+                        data = {}
+                data[sensorName] = {
+                    "state": request_body.get("state"),
+                    "attributes": request_body.get("attributes") or {},
+                    "updated": datetime.now().isoformat(timespec="seconds"),
+                }
+                with open(path, "w") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=1)
+            logging.info(f"快照传感器 {sensorName} 状态已更新: {request_body.get('state')}")
+        except Exception as e:
+            logging.error(f"快照写入失败（{sensorName}）: {e}")
 
     # 二开新增：水/气传感器的图标与友好名映射（不设置 icon 时 HA 默认显示小眼睛）
     _BILL_SENSOR_NAMES = {
@@ -431,11 +515,6 @@ class SensorUpdator:
         :param sensorState: 传感器的状态
         :param sensorUnit: 传感器的单位
         """
-        token = os.getenv("SUPERVISOR_TOKEN") if self.base_url == SUPERVISOR_URL else self.token
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + token
-        }
         if month:
             last_updated = datetime.now().strftime("%Y-%m")
         else:
@@ -460,10 +539,5 @@ class SensorUpdator:
                 }
             }
         url = self.base_url + API_PATH + sensorName  # /api/states/<entity_id>
-        try:
-            response = requests.post(url, json=request_body, headers=headers)
-            logging.debug(
-                f"Homeassistant REST API invoke, POST on {url}. response[{response.status_code}]: {response.content}")
-            logging.info(f"Homeassistant sensor {sensorName} state updated: {sensorState}{sensorUnit}")
-        except Exception as e:
-            logging.error(f"Homeassistant REST API invoke failed, reason is {e}")
+        self.send_url(sensorName, request_body)
+        logging.info(f"Homeassistant sensor {sensorName} state updated: {sensorState}{sensorUnit}")

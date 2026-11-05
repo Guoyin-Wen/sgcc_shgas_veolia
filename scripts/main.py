@@ -66,6 +66,12 @@ def main():
     fetcher = DataFetcher(PHONE_NUMBER, PASSWORD, SHRQ_PHONE_NUMBER, SHRQ_PASSWORD, PDWLY_ID)
     updator = SensorUpdator()
 
+    # RESTFUL 推送模式：启动只读快照端点，供 HA rest 集成拉取
+    if updator.push_mode == "RESTFUL":
+        import threading
+        from state_server import start_state_server
+        threading.Thread(target=start_state_server, daemon=True).start()
+
     # 生成随机延迟时间（-10分钟到+10分钟）
     random_delay_minutes = random.randint(-10, 10)
     parsed_time = datetime.strptime(JOB_START_TIME, "%H:%M") + timedelta(minutes=random_delay_minutes)

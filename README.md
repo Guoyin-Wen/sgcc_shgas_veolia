@@ -21,6 +21,95 @@ PDWLY_ID=['xxxxxxxxx','yyyyyyyyy']
 | `sensor.yearly_shrq_usage` | 上海燃气 年用量 |
 | `sensor.last_pdwly_usage_total` / `_water` / `_dirty` | 浦东威立雅 本期用量（总 / 生活水 / 污水，m³）|
 | `sensor.last_pdwly_charge_total` / `_water` / `_dirty` | 浦东威立雅 本期费用（总 / 生活水 / 污水）|
+| `sensor.pdwly_meter_reading` | 浦东威立雅 本期水表读数（attributes 含上期读数、抄表日、下次抄表日、近 12 期历史账单）|
+| `sensor.pdwly_pay_status` | 浦东威立雅 本期缴费状态（attributes 含缴费时间、实收金额）|
+
+### 数据推送方式（重要）
+
+通过 `PUSH_MODE` 环境变量选择数据进入 Home Assistant 的方式，三种模式：
+
+| 模式 | 原理 | 重启 HA 后 | 长期统计/能源面板 | 推荐度 |
+|---|---|---|---|---|
+| `MQTT` | MQTT discovery 注册正规实体 | retained 消息秒恢复 | ✅ | **推荐** |
+| `RESTFUL` | 本项目暴露只读端点，HA `rest` 集成定时拉取 | 启动即拉取 | ✅ | 推荐（不想装 broker 时） |
+| `LEGACY` | REST API 直推（上游原始方式） | 实体变 unavailable，等待重发 | ❌ | 历史遗留，仅为兼容保留，不推荐 |
+
+#### 方式一：MQTT（推荐）
+
+实体经 HA 官方 MQTT 集成注册：有 unique_id、重启后从 retained 消息恢复、自动进入长期统计、可在 UI 中改名/改图标，且全部实体自动归组到 `SGCC 水电气` 设备下。
+
+1. 部署 broker（任一台内网机器，示例 `docker-compose.yml`）：
+
+```yaml
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./config:/mosquitto/config
+      - ./data:/mosquitto/data
+```
+
+`config/mosquitto.conf`：
+
+```
+listener 1883
+allow_anonymous false
+password_file /mosquitto/config/passwd
+persistence true
+persistence_location /mosquitto/data/
+```
+
+生成账号：`docker run --rm -v ./config:/mosquitto/config eclipse-mosquitto:2 mosquitto_passwd -c /mosquitto/config/passwd <用户名>`
+
+2. 本项目 `.env` 配置：
+
+```bash
+PUSH_MODE=MQTT
+MQTT_HOST=<broker 地址>   # broker 与本项目同机且 host 网络时填 127.0.0.1
+MQTT_PORT=1883
+MQTT_USER=<用户名>
+MQTT_PASSWORD=<密码>
+```
+
+3. HA 侧：设置 → 设备与服务 → 添加集成 → 搜索 **MQTT** → 填 broker 地址与账号。添加后 `SGCC 水电气` 设备及全部传感器自动出现，无需任何 YAML。
+
+#### 方式二：RESTFUL（免 broker）
+
+本项目内置只读快照端点（`GET http://<本项目IP>:8300/sensors`，端口可用 `STATE_SERVER_PORT` 修改），HA 用官方 `rest` 集成定时拉取。实体由 RESTful platform 注册，同样支持重启恢复与长期统计。
+
+`.env` 配置：
+
+```bash
+PUSH_MODE=RESTFUL
+STATE_SERVER_PORT=8300
+```
+
+HA `configuration.yaml` 示例（每个需要的传感器一段，`scan_interval` 建议 900 秒以上——数据本身一天只更新两次）：
+
+```yaml
+sensor:
+  - platform: rest
+    resource: http://<本项目IP>:8300/sensors
+    name: pdwly_charge_total
+    unique_id: pdwly_charge_total
+    unit_of_measurement: "CNY"
+    device_class: monetary
+    state_class: measurement
+    value_template: "{{ value_json['sensor.last_pdwly_charge_total'].state }}"
+    json_attributes_path: "sensor.last_pdwly_charge_total"
+    json_attributes:
+      - attributes
+    scan_interval: 900
+```
+
+#### 方式三：LEGACY（历史遗留，不推荐）
+
+上游原始方式：直接 `POST /api/states/` 写入，实体为"无主实体"——重启 HA 后 unavailable、不进长期统计、不能在 UI 中管理。仅因向后兼容保留。若必须使用并希望重启后实体可用，参考上游 README 的 trigger template 方案为每个实体配置镜像传感器。
+
 
 ### Home Assistant 展示效果
 

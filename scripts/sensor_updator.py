@@ -387,6 +387,31 @@ class SensorUpdator:
         except Exception as e:
             logging.error(f"Home Assistant REST API 调用失败，原因是 {e}")
 
+    # 二开新增：水/气传感器的图标与友好名映射（不设置 icon 时 HA 默认显示小眼睛）
+    _BILL_SENSOR_NAMES = {
+        PDWLY_MONTHLY_USAGE_TOTAL_SENSOR_NAME: "威立雅本期总用量",
+        PDWLY_MONTHLY_USAGE_WATER_SENSOR_NAME: "威立雅本期用水量",
+        PDWLY_MONTHLY_USAGE_DIRTY_SENSOR_NAME: "威立雅本期污水量",
+        PDWLY_MONTHLY_CHARGE_TOTAL_SENSOR_NAME: "威立雅本期总费用",
+        PDWLY_MONTHLY_CHARGE_WATER_SENSOR_NAME: "威立雅本期水费",
+        PDWLY_MONTHLY_CHARGE_DIRTY_SENSOR_NAME: "威立雅本期污水费",
+        SHRQ_BALANCE_SENSOR_NAME: "燃气本期用量",
+        SHRQ_MONTHLY_USAGE_SENSOR_NAME: "燃气本期费用",
+        SHRQ_YEARLY_USAGE_SENSOR_NAME: "燃气年用量",
+    }
+
+    def _bill_sensor_meta(self, sensorName: str, sensorUnit: str) -> dict:
+        # 命名历史交叉：SHRQ_BALANCE 实际承载用量(m³)、SHRQ_MONTHLY_USAGE 实际承载金额(CNY)，按单位判类型
+        if sensorUnit == BALANCE_UNIT:
+            icon, dc = "mdi:cash", "monetary"
+        elif "shrq" in sensorName:
+            icon, dc = "mdi:meter-gas", "gas"
+        else:
+            icon, dc = "mdi:water", "water"
+        base = sensorName.rsplit("_", 1)[0] if sensorName.rsplit("_", 1)[-1].isdigit() else sensorName
+        return {"icon": icon, "device_class": dc, "state_class": "measurement",
+                "friendly_name": self._BILL_SENSOR_NAMES.get(base, base)}
+
     # 二开新增：带完整 attributes 的传感器更新（浦东威立雅表底/缴费状态等）
     def update_attrs(self, sensorName: str, sensorState, attributes: dict):
         request_body = {
@@ -415,12 +440,14 @@ class SensorUpdator:
             last_updated = datetime.now().strftime("%Y-%m")
         else:
             last_updated = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f%z")
+        meta = self._bill_sensor_meta(sensorName, sensorUnit)
         if present_date:
             request_body = {
                 "state": sensorState,
                 "attributes": {
                     "present_date": present_date,
-                    "unit_of_measurement": sensorUnit
+                    "unit_of_measurement": sensorUnit,
+                    **meta
                 }
             }
         else:
@@ -428,7 +455,8 @@ class SensorUpdator:
                 "state": sensorState,
                 "unique_id": sensorName,
                 "attributes": {
-                    "unit_of_measurement": sensorUnit
+                    "unit_of_measurement": sensorUnit,
+                    **meta
                 }
             }
         url = self.base_url + API_PATH + sensorName  # /api/states/<entity_id>

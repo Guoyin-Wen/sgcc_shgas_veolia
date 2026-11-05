@@ -89,6 +89,7 @@ def main():
         run_task(fetcher, updator)
     else:
         logging.info("已从缓存恢复数据，跳过启动时抓取以保护账号。")
+        fetcher.republish_local_bills(updator)
 
     while True:
         schedule.run_pending()
@@ -96,6 +97,8 @@ def main():
 
 
 def republish_or_fetch(updator: SensorUpdator, fetcher: DataFetcher):
+    # 水/气从本地 sqlite 重发（零外部请求），国网走缓存重发或实时抓取
+    fetcher.republish_local_bills(updator)
     if not updator.republish():
         logging.info("缓存数据已过期或不存在，正在从国家电网获取数据...")
         run_task(fetcher, updator)

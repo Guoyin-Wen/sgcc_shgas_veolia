@@ -16,6 +16,7 @@ from datetime import datetime
 from io import BytesIO
 from PIL import Image
 from playwright.sync_api import sync_playwright, TimeoutError as PltTimeout
+from const import *
 from sensor_updator import SensorUpdator
 from error_watcher import ErrorWatcher
 from typing import Optional, Tuple
@@ -965,7 +966,7 @@ class DataFetcher:
         :param user_id: 用户ID"""
         try:
             # 创建数据库
-            self.connect = sqlite3.connect(os.getenv("DB_NAME"))
+            self.connect = sqlite3.connect(os.path.join(get_data_dir(), os.getenv("DB_NAME", "homeassistant.db")))
             self.connect.cursor()
             logging.info(f"Database of {os.getenv('DB_NAME')} created successfully.")
             try:
@@ -996,7 +997,7 @@ class DataFetcher:
         :param user_id: 用户ID"""
         try:
             # 创建数据库
-            self.connect = sqlite3.connect(os.getenv("DB_NAME"))
+            self.connect = sqlite3.connect(os.path.join(get_data_dir(), os.getenv("DB_NAME", "homeassistant.db")))
             self.connect.cursor()
             logging.info(f"Database of {os.getenv('DB_NAME')} created successfully.")
             try:
@@ -1059,6 +1060,67 @@ class DataFetcher:
             return user_id_list, yearly_usage_list, month_usage_list, month_charge_list, month_list
         finally:
             logging.info("Fetching shrq data successfully.")
+
+    def republish_local_bills(self, updator):
+        """水/气缓存重发：从 sqlite 本地库读最新一期账单重推 HA（不打外部接口，供 HA 重启后恢复）"""
+        try:
+            db_path = os.path.join(get_data_dir(), os.getenv("DB_NAME", "homeassistant.db"))
+            if not os.path.exists(db_path):
+                return
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+
+            if self.pdwly_id:
+                id_list = eval(self.pdwly_id)
+                for user in id_list:
+                    try:
+                        row = cur.execute(
+                            f"SELECT date,waternum,dirtynum,waterfee,dirtyfee,meterdata,prevmeterdata,billstatus,paytime,copymeterdate,nextdate "
+                            f"FROM pdwly_bill{user} ORDER BY date DESC LIMIT 1").fetchone()
+                        if not row:
+                            continue
+                        date, waternum, dirtynum, waterfee, dirtyfee, meterdata, prevmeterdata, billstatus, paytime, copymeterdate, nextdate = row
+                        profix = f"_{user}" if len(id_list) > 1 else ""
+                        updator.update(PDWLY_MONTHLY_USAGE_TOTAL_SENSOR_NAME + profix, date, str(float(waternum) + float(dirtynum)), USAGE_UNIT_CUBE, month=True)
+                        updator.update(PDWLY_MONTHLY_USAGE_WATER_SENSOR_NAME + profix, date, waternum, USAGE_UNIT_CUBE, month=True)
+                        updator.update(PDWLY_MONTHLY_USAGE_DIRTY_SENSOR_NAME + profix, date, dirtynum, USAGE_UNIT_CUBE, month=True)
+                        updator.update(PDWLY_MONTHLY_CHARGE_TOTAL_SENSOR_NAME + profix, date, str(float(waterfee) + float(dirtyfee)), BALANCE_UNIT, month=True)
+                        updator.update(PDWLY_MONTHLY_CHARGE_WATER_SENSOR_NAME + profix, date, waterfee, BALANCE_UNIT, month=True)
+                        updator.update(PDWLY_MONTHLY_CHARGE_DIRTY_SENSOR_NAME + profix, date, dirtyfee, BALANCE_UNIT, month=True)
+                        updator.update_attrs(PDWLY_METER_READING_SENSOR_NAME + profix, meterdata, {
+                            "friendly_name": f"水表读数{profix}", "unit_of_measurement": USAGE_UNIT_CUBE,
+                            "device_class": "water", "state_class": "total", "icon": "mdi:counter",
+                            "period": date, "meter_prev": prevmeterdata,
+                            "copymeterdate": copymeterdate, "nextdate": nextdate,
+                        })
+                        updator.update_attrs(PDWLY_PAY_STATUS_SENSOR_NAME + profix,
+                                             "已缴费" if str(billstatus) == "1" else "未缴费", {
+                            "friendly_name": f"水费缴费状态{profix}", "icon": "mdi:receipt-text-check",
+                            "period": date, "paytime": paytime,
+                        })
+                    except Exception as e:
+                        logging.warning(f"威立雅本地账单重发失败（用户 {user}）: {e}")
+
+            shrq_tables = [r[0] for r in cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'shrq_bill%'").fetchall()]
+            for t in shrq_tables:
+                try:
+                    row = cur.execute(
+                        f"SELECT billYM,consumption,money,yearConsumption FROM {t} ORDER BY billYM DESC LIMIT 1").fetchone()
+                    if not row:
+                        continue
+                    billym, consumption, money, yearconsumption = row
+                    profix = "_" + t[len("shrq_bill"):] if len(shrq_tables) > 1 else ""
+                    updator.update(SHRQ_BALANCE_SENSOR_NAME + profix, None, consumption, USAGE_UNIT_CUBE)
+                    updator.update(SHRQ_MONTHLY_USAGE_SENSOR_NAME + profix, billym, money, BALANCE_UNIT, month=True)
+                    updator.update(SHRQ_YEARLY_USAGE_SENSOR_NAME + profix, billym, yearconsumption, USAGE_UNIT_CUBE, month=True)
+                except Exception as e:
+                    logging.warning(f"燃气本地账单重发失败（{t}）: {e}")
+
+            conn.close()
+            logging.info("水/气本地账单重发完成。")
+        except Exception as e:
+            logging.error(f"水/气本地账单重发失败: {e}")
 
     def _get_pdwly_data(self):
         # 当前月份

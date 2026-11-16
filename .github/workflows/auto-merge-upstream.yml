@@ -25,6 +25,8 @@ jobs:
       - name: Merge arc/master into main
         run: |
           set -e
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
           git remote add arc https://github.com/ARC-MX/sgcc_electricity_new.git
           git fetch arc master
 

@@ -2155,6 +2155,29 @@ class DataFetcher:
                         logging.debug(f"[{user_id}] 分时日用电 {row.get('date')} 写入失败: {e}")
                 logging.info(f"[{user_id}] Vue state 分时日用电已写入 {tou_count} 条")
 
+                # 计算逐日累计用量（自首条记录起从 0 累加），供 HA 长期统计 sum 列使用；
+                # Energy 面板吃 sum 差值，序列必须单调且跨轮次连续，故以 sqlite 全表为准
+                try:
+                    cur = self.db._conn.cursor()
+                    cur.execute(f"SELECT date, usage FROM {self.db.table_name} ORDER BY date")
+                    all_rows = cur.fetchall()
+                    cur.close()
+                    cum = 0.0
+                    cum_map = {}
+                    for d, u in all_rows:
+                        try:
+                            cum = round(cum + float(u), 3)
+                        except (TypeError, ValueError):
+                            continue
+                        ds = str(d)[:10]
+                        cum_map[ds] = cum
+                    for row in tou_data["daily"]:
+                        if row.get("date") and str(row["date"])[:10] in cum_map:
+                            row["cum_usage"] = cum_map[str(row["date"])[:10]]
+                    logging.info(f"[{user_id}] 每日累计值已计算（{len(cum_map)} 天，最新累计 {cum}）")
+                except Exception as e:
+                    logging.warning(f"[{user_id}] 每日累计值计算失败，本轮统计导入不带 sum 列: {e}")
+
             # 写入月度用电量（DOM 方式）
             if month:
                 cur_year = str(datetime.now().year)

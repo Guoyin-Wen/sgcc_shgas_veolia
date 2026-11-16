@@ -416,11 +416,21 @@ class SensorUpdator:
         # ⚠️ 2026-11-17 起改用外部统计 id（sgcc:xxx，非实体 ID）：HA 2026.11 对实体 ID 格式的
         # import_statistics 一律按 recorder 内部统计处理，实体会因"无 state_class 但有统计"反复告警
         statistic_id = "sgcc:daily_electricity_usage" + postfix
-        stats = [{
-            "start": f"{r['date']}T00:00:00+08:00",
-            "mean": float(r["total_usage"]),
-            "max": float(r["total_usage"]),
-        } for r in rows]
+        # sum 列 = 自 sqlite 首条记录起的逐日累计（Energy 面板吃 sum 差值；必须单调连续，不能带年基数，
+        # 否则查询范围首行会出现整条累计的假尖峰）。cum_usage 由 data_fetcher 从 sqlite 全表算出注入；
+        # 缺失时只导 mean 不带 sum，宁可少一列也不导入会跳变的序列
+        stats = []
+        for r in rows:
+            u = float(r["total_usage"])
+            item = {
+                "start": f"{r['date']}T00:00:00+08:00",
+                "mean": u,
+                "max": u,
+            }
+            if r.get("cum_usage") is not None:
+                item["sum"] = float(r["cum_usage"])
+                item["state"] = float(r["cum_usage"])
+            stats.append(item)
         self._import_statistics_ws(statistic_id, stats)
 
     def _import_statistics_ws(self, statistic_id: str, stats: list):
@@ -439,7 +449,8 @@ class SensorUpdator:
             "type": "recorder/import_statistics",
             "metadata": {
                 "has_mean": True,
-                "has_sum": False,
+                # 是否带 sum 列按实际数据决定（Energy 面板依赖 sum 差值；缺 cum 时不硬标）
+                "has_sum": any("sum" in s for s in stats),
                 "statistic_id": statistic_id,
                 "unit_of_measurement": "kWh",
                 "unit_class": "energy",

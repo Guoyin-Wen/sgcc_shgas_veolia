@@ -45,6 +45,14 @@ def main():
         except sqlite3.OperationalError as e:
             logging.warning(f"[{uid}] 无 daily 表: {e}")
             continue
+        # 逐日累计（从 0 起算），供统计 sum 列
+        cum = 0.0
+        for r in rows:
+            try:
+                cum = round(cum + float(r["total_usage"]), 3)
+                r["cum_usage"] = cum
+            except (TypeError, ValueError):
+                continue
         rng = f"{rows[0]['date']} ~ {rows[-1]['date']}" if rows else "无数据"
         logging.info(f"[{uid}] sqlite 每日数据 {len(rows)} 条: {rng}")
         if rows:

@@ -35,9 +35,9 @@ class SensorUpdator:
             self.balance_notify = None
 
 
-    def update_one_userid(self, user_id: str, balance: float, last_daily_date: str, last_daily_usage: float, yearly_charge: float, yearly_usage: float, month_charge: float, month_usage: float, tou_data: dict = None, enhanced_balance: dict = None, bill_tou_data: dict = None, notify=True):
+    def update_one_userid(self, user_id: str, balance: float, last_daily_date: str, last_daily_usage: float, yearly_charge: float, yearly_usage: float, month_charge: float, month_usage: float, month_bill_date=None, tou_data: dict = None, enhanced_balance: dict = None, bill_tou_data: dict = None, notify=True):
         logging.info(f"[{user_id}] 开始更新 Home Assistant 传感器数据...")
-        self._save_to_cache(user_id, balance, last_daily_date, last_daily_usage, yearly_charge, yearly_usage, month_charge, month_usage, tou_data, enhanced_balance, bill_tou_data)
+        self._save_to_cache(user_id, balance, last_daily_date, last_daily_usage, yearly_charge, yearly_usage, month_charge, month_usage, month_bill_date, tou_data, enhanced_balance, bill_tou_data)
         postfix = f"_{user_id[-4:]}"
         if balance is not None:
             if notify and self.balance_notify is not None:
@@ -50,12 +50,19 @@ class SensorUpdator:
         if yearly_charge is not None:
             self.update_yearly_data(postfix, yearly_charge)
         if month_usage is not None:
-            self.update_month_data(postfix, month_usage, usage=True)
+            self.update_month_data(postfix, month_usage, usage=True, bill_date=month_bill_date)
         if month_charge is not None:
-            self.update_month_data(postfix, month_charge)
+            self.update_month_data(postfix, month_charge, bill_date=month_bill_date)
 
         # 分时电量传感器（优先用账单数据，更准确）
         self._update_tou_sensors(postfix, tou_data, bill_tou_data)
+
+        # 每日用电量趋势：独立实体 + 逐日精确长期统计导入（供仪表板日趋势图）
+        if tou_data and tou_data.get("daily"):
+            try:
+                self.update_daily_series(postfix, tou_data["daily"])
+            except Exception as e:
+                logging.warning(f"每日用电量趋势更新失败（不影响其他数据）: {e}")
 
         # 应交金额传感器
         if enhanced_balance and enhanced_balance.get("amount_due") is not None:
@@ -67,7 +74,7 @@ class SensorUpdator:
         from const import get_data_dir
         return os.path.join(get_data_dir(), 'sgcc_cache.json')
 
-    def _save_to_cache(self, user_id, balance, last_daily_date, last_daily_usage, yearly_charge, yearly_usage, month_charge, month_usage, tou_data=None, enhanced_balance=None, bill_tou_data=None):
+    def _save_to_cache(self, user_id, balance, last_daily_date, last_daily_usage, yearly_charge, yearly_usage, month_charge, month_usage, month_bill_date=None, tou_data=None, enhanced_balance=None, bill_tou_data=None):
         cache_file = self._get_cache_file()
         abs_cache_file = os.path.abspath(cache_file)
         data = {}
@@ -86,6 +93,7 @@ class SensorUpdator:
             "yearly_usage": yearly_usage,
             "month_charge": month_charge,
             "month_usage": month_usage,
+            "month_bill_date": month_bill_date,
             "timestamp": datetime.now().isoformat()
         }
 
@@ -186,7 +194,7 @@ class SensorUpdator:
     def update_last_daily_usage(self, postfix: str, last_daily_date: str, sensorState: float):
         sensorName = DAILY_USAGE_SENSOR_NAME + postfix
 
-        if not self.should_update(sensorName, sensorState, {"last_reset": last_daily_date}):
+        if not self.should_update(sensorName, sensorState, {"data_date": last_daily_date}):
              logging.info(f"跳过 {sensorName} 的更新，状态相同。")
              return
 
@@ -194,7 +202,7 @@ class SensorUpdator:
             "state": sensorState,
             "unique_id": sensorName,
             "attributes": {
-                "last_reset": last_daily_date,
+                "data_date": last_daily_date,
                 "unit_of_measurement": "kWh",
                 "icon": "mdi:lightning-bolt",
                 "device_class": "energy",
@@ -233,7 +241,7 @@ class SensorUpdator:
         self.send_url(sensorName, request_body)
         logging.info(f"Home Assistant 传感器 {sensorName} 状态已更新: {sensorState} CNY")
 
-    def update_month_data(self, postfix: str, sensorState: float, usage=False):
+    def update_month_data(self, postfix: str, sensorState: float, usage=False, bill_date=None):
         sensorName = (
             MONTH_USAGE_SENSOR_NAME + postfix
             if usage
@@ -243,8 +251,9 @@ class SensorUpdator:
         first_day_of_current_month = current_date.replace(day=1)
         last_day_of_previous_month = first_day_of_current_month - timedelta(days=1)
         last_reset = last_day_of_previous_month.strftime("%Y-%m")
+        bill_period = bill_date or last_reset
 
-        if not self.should_update(sensorName, sensorState, {"last_reset": last_reset}):
+        if not self.should_update(sensorName, sensorState, {"bill_period": bill_period}):
              logging.info(f"跳过 {sensorName} 的更新，状态相同。")
              return
 
@@ -252,7 +261,7 @@ class SensorUpdator:
             "state": sensorState,
             "unique_id": sensorName,
             "attributes": {
-                "last_reset": last_reset,
+                "bill_period": bill_period,
                 "unit_of_measurement": "kWh" if usage else "CNY",
                 "icon": "mdi:lightning-bolt" if usage else "mdi:cash",
                 "device_class": "energy" if usage else "monetary",
@@ -358,6 +367,113 @@ class SensorUpdator:
             self.send_url(sensorName, request_body)
             logging.info(f"Home Assistant 传感器 {sensorName} 状态已更新: {value} kWh ({label})")
 
+    def update_daily_series(self, postfix: str, daily_rows: list):
+        """每日用电量趋势（二开新增）：
+        1. MQTT 推独立实体（无 state_class → recorder 不生成自动统计）
+        2. 把每天用量按天导入 HA recorder 长期统计（WS recorder/import_statistics），
+           statistics-graph(period: day, stat_types: [mean]) 即可画出精确逐日柱状图。
+        daily_rows: [{"date": "YYYY-MM-DD", "total_usage": x.x, 谷/平/峰/尖...}, ...]
+        """
+        rows = []
+        for r in daily_rows or []:
+            try:
+                u = float(r.get("total_usage"))
+                if r.get("date") and u >= 0:
+                    rows.append(r)
+            except (TypeError, ValueError):
+                continue
+        if not rows:
+            return
+        rows.sort(key=lambda r: r["date"])
+        latest = rows[-1]
+        sensorName = DAILY_ELE_SENSOR_NAME + postfix
+
+        # 实体状态 = 最新一日用量；attributes 带分时明细
+        # ⚠️ 故意不带 state_class：recorder 自动统计会把实体 state（最近一期日用量）按小时采样，
+        # 在数据日期之后的每一天生成假"日用量"统计点，与手动导入的精确统计混在同一图上（2026-11-10 回滚 11-07 的加法）
+        if not self.should_update(sensorName, float(latest["total_usage"]),
+                                  {"data_date": latest["date"]}):
+            logging.info(f"跳过 {sensorName} 的更新，状态相同。")
+        else:
+            request_body = {
+                "state": float(latest["total_usage"]),
+                "unique_id": sensorName,
+                "attributes": {
+                    "data_date": latest["date"],
+                    "unit_of_measurement": "kWh",
+                    "icon": "mdi:lightning-bolt",
+                    "device_class": "energy",
+                    "friendly_name": "每日用电量",
+                    "valley_usage": latest.get("valley_usage"),
+                    "flat_usage": latest.get("flat_usage"),
+                    "peak_usage": latest.get("peak_usage"),
+                    "tip_usage": latest.get("tip_usage"),
+                },
+            }
+            self.send_url(sensorName, request_body)
+
+        # 逐日长期统计导入（幂等：同 start 重复导入同值无害）
+        statistic_id = "sensor.sgcc_shgas_veolia_daily_electricity_usage" + postfix
+        stats = [{
+            "start": f"{r['date']}T00:00:00+08:00",
+            "mean": float(r["total_usage"]),
+            "max": float(r["total_usage"]),
+        } for r in rows]
+        self._import_statistics_ws(statistic_id, stats)
+
+    def _import_statistics_ws(self, statistic_id: str, stats: list):
+        """经 HA WebSocket recorder/import_statistics 导入长期统计（二开新增）。
+        优先 HASS_URL，失败回退内网 http://192.168.1.12；仅告警不抛错。"""
+        import asyncio
+        import re as _re
+
+        base = self.base_url.rstrip("/")
+        candidates = [_re.sub(r"^http", "ws", base) + "/api/websocket"]
+        if "192.168.1.12" not in base:
+            candidates.append("ws://192.168.1.12/api/websocket")
+
+        payload = {
+            "id": 1,
+            "type": "recorder/import_statistics",
+            "metadata": {
+                "has_mean": True,
+                "has_sum": False,
+                "statistic_id": statistic_id,
+                "unit_of_measurement": "kWh",
+                "source": "recorder",
+                "name": "每日用电量",
+            },
+            "stats": stats,
+        }
+
+        async def _run():
+            import websockets
+            last_err = None
+            for url in candidates:
+                try:
+                    async with websockets.connect(url, open_timeout=10) as ws:
+                        await ws.recv()  # auth_required
+                        await ws.send(json.dumps(
+                            {"type": "auth", "access_token": self.token}))
+                        msg = json.loads(await ws.recv())
+                        if msg.get("type") != "auth_ok":
+                            raise RuntimeError(f"auth 失败: {msg.get('type')}")
+                        await ws.send(json.dumps(payload))
+                        r = json.loads(await ws.recv())
+                        if not r.get("success"):
+                            raise RuntimeError(f"导入被拒: {r.get('error')}")
+                        return len(stats)
+                except Exception as e:
+                    last_err = e
+                    logging.warning(f"统计导入 {url} 失败: {e}")
+            raise last_err
+
+        try:
+            n = asyncio.run(_run())
+            logging.info(f"已导入 {n} 天每日用电量统计到 {statistic_id}")
+        except Exception as e:
+            logging.warning(f"[{statistic_id}] 每日统计导入最终失败: {e}")
+
     def update_prepay_balance(self, postfix: str, sensorState: float):
         """更新预付费余额传感器"""
         sensorName = PREPAY_BALANCE_SENSOR_NAME + postfix
@@ -420,10 +536,11 @@ class SensorUpdator:
             attrs_topic = f"home/sgcc_veolia/{object_id}/attributes"
             attrs = dict(request_body.get("attributes") or {})
             if sensorName not in self._mqtt_published:
-                # name 必须用 object_id（英文 slug）：中文 name 会被 HA 转成拼音 entity_id。
-                # 带 device 时 HA 会强制给 entity_id 加设备名前缀（sgcc_shgas_veolia_<name>）
+                # 实体已全部在 HA 注册（unique_id 锁定 entity_id），首次注册后改 name
+                # 只刷新 friendly_name、不动 entity_id，故 name 可安全用中文显示名
+                base = object_id.rsplit("_", 1)[0] if object_id.rsplit("_", 1)[-1].isdigit() else object_id
                 config = {
-                    "name": object_id,
+                    "name": self._CN_SENSOR_NAMES.get(base, object_id),
                     "unique_id": object_id,
                     "state_topic": state_topic,
                     "value_template": "{{ value_json.state }}",
@@ -471,6 +588,37 @@ class SensorUpdator:
             logging.info(f"快照传感器 {sensorName} 状态已更新: {request_body.get('state')}")
         except Exception as e:
             logging.error(f"快照写入失败（{sensorName}）: {e}")
+
+    # 二开新增：MQTT discovery 中文显示名（键为去户号尾缀的 base 名；语义按 2026-11-06 核实：
+    # month_* 实为上月已出账账单、last_electricity_usage 为昨日数据、水/气 last_* 为最近一期账单）
+    _CN_SENSOR_NAMES = {
+        "electricity_charge_balance": "电费余额",
+        "prepay_balance": "预付费余额",
+        "last_electricity_usage": "最新日用电量",
+        "yearly_electricity_usage": "年度累计用电量",
+        "yearly_electricity_charge": "年度累计电费",
+        "month_electricity_usage": "上月用电量",
+        "month_electricity_charge": "上月电费",
+        "month_valley_usage": "上月谷时电量",
+        "month_flat_usage": "上月平时电量",
+        "month_peak_usage": "上月峰时电量",
+        "month_tip_usage": "上月尖峰电量",
+        "daily_electricity_usage": "每日用电量趋势",
+        "last_water_usage_total": "上期总用水量",
+        "last_water_usage_tap": "上期自来水用量",
+        "last_water_usage_sewage": "上期污水量",
+        "last_water_charge_total": "上期总水费",
+        "last_water_charge_tap": "上期自来水费",
+        "last_water_charge_sewage": "上期污水处理费",
+        "water_meter_reading": "水表读数",
+        "water_pay_status": "水费缴费状态",
+        "gas_last_usage": "上期用气量",
+        "gas_last_charge": "上期燃气费",
+        "gas_yearly_usage": "燃气年用量",
+        "gas_meter_reading": "燃气表读数",
+        "gas_pay_status": "燃气缴费状态",
+        "gas_next_read_date": "下次抄表日",
+    }
 
     # 二开新增：水/气传感器的图标与友好名映射（不设置 icon 时 HA 默认显示小眼睛）
     _BILL_SENSOR_NAMES = {

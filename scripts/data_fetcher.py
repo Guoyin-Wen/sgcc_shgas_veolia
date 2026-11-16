@@ -1105,15 +1105,22 @@ class DataFetcher:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'shrq_bill%'").fetchall()]
             for t in shrq_tables:
                 try:
+                    _cols = ("billYM", "consumption", "money", "yearConsumption", "paymentStatus", "billingDate",
+                             "readDate", "nextReadDate", "lastReading", "currentReading", "price", "lastPayday",
+                             "firstGear", "secondGear", "firstCount", "secondCount", "thirdCount",
+                             "firstMoney", "secondMoney", "thirdMoney", "date")
+                    # 排序列必须是 date（billYM 列是倒序垃圾值，ORDER BY billYM 会取到 2017/2019 期旧账单）
                     row = cur.execute(
-                        f"SELECT billYM,consumption,money,yearConsumption FROM {t} ORDER BY billYM DESC LIMIT 1").fetchone()
+                        f"SELECT {','.join(_cols)} FROM {t} ORDER BY date DESC LIMIT 1").fetchone()
                     if not row:
                         continue
-                    billym, consumption, money, yearconsumption = row
+                    bill = dict(zip(_cols, row))
+                    billym, consumption, money, yearconsumption = bill["billYM"], bill["consumption"], bill["money"], bill["yearConsumption"]
                     profix = "_" + t[len("shrq_bill"):] if len(shrq_tables) > 1 else ""
                     updator.update(SHRQ_BALANCE_SENSOR_NAME + profix, None, consumption, USAGE_UNIT_CUBE)
                     updator.update(SHRQ_MONTHLY_USAGE_SENSOR_NAME + profix, billym, money, BALANCE_UNIT, month=True)
                     updator.update(SHRQ_YEARLY_USAGE_SENSOR_NAME + profix, billym, yearconsumption, USAGE_UNIT_CUBE, month=True)
+                    self._publish_shrq_bill_detail(updator, profix, bill)
                 except Exception as e:
                     logging.warning(f"燃气本地账单重发失败（{t}）: {e}")
 
@@ -1121,6 +1128,39 @@ class DataFetcher:
             logging.info("水/气本地账单重发完成。")
         except Exception as e:
             logging.error(f"水/气本地账单重发失败: {e}")
+
+    def _publish_shrq_bill_detail(self, updator, profix: str, bill: dict):
+        """二开新增：燃气账单明细推送（表读数/缴费状态/下次抄表日，档位分布挂表读数 attributes；2026-11-09 从 .bak-20261106-billdate 考古恢复，曾被后续 docker cp 覆盖丢失）"""
+        try:
+            if not bill:
+                return
+            if bill.get("currentReading") not in (None, ""):
+                updator.update_attrs(SHRQ_METER_READING_SENSOR_NAME + profix, bill.get("currentReading"), {
+                    "friendly_name": f"燃气表读数{profix}", "unit_of_measurement": USAGE_UNIT_CUBE,
+                    "device_class": "gas", "state_class": "total", "icon": "mdi:counter",
+                    "period": bill.get("date", ""), "meter_prev": bill.get("lastReading", ""),
+                    "consumption": bill.get("consumption", ""), "read_date": bill.get("readDate", ""),
+                    "price": bill.get("price", ""),
+                    "year_consumption": bill.get("yearConsumption", ""),
+                    "first_gear": bill.get("firstGear", ""), "second_gear": bill.get("secondGear", ""),
+                    "first_count": bill.get("firstCount", ""), "second_count": bill.get("secondCount", ""),
+                    "third_count": bill.get("thirdCount", ""),
+                    "first_money": bill.get("firstMoney", ""), "second_money": bill.get("secondMoney", ""),
+                    "third_money": bill.get("thirdMoney", ""),
+                })
+            if bill.get("paymentStatus"):
+                updator.update_attrs(SHRQ_PAY_STATUS_SENSOR_NAME + profix, bill.get("paymentStatus"), {
+                    "friendly_name": f"燃气缴费状态{profix}", "icon": "mdi:receipt-text-check",
+                    "period": bill.get("date", ""), "money": bill.get("money", ""),
+                    "last_payday": bill.get("lastPayday", ""), "billing_date": bill.get("billingDate", ""),
+                })
+            if bill.get("nextReadDate"):
+                updator.update_attrs(SHRQ_NEXT_READ_SENSOR_NAME + profix, str(bill.get("nextReadDate"))[:10], {
+                    "friendly_name": f"下次抄表日{profix}", "icon": "mdi:calendar-clock",
+                    "period": bill.get("date", ""),
+                })
+        except Exception as e:
+            logging.warning(f"燃气账单明细推送失败: {e}")
 
     def _get_pdwly_data(self):
         # 当前月份
@@ -1471,10 +1511,11 @@ class DataFetcher:
                 time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
                 if self._get_current_userid() in self.IGNORE_USER_ID:
                     continue
-                balance, ldd, ldu, yc, yu, mc, mu, td, eb, bt = self._get_all_data(
+                balance, ldd, ldu, yc, yu, mc, mu, mbd, td, eb, bt = self._get_all_data(
                     user_id, userid_index)
                 updator.update_one_userid(
                     user_id, balance, ldd, ldu, yc, yu, mc, mu,
+                    month_bill_date=mbd,
                     tou_data=td, enhanced_balance=eb, bill_tou_data=bt)
                 time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
             except Exception as e:
@@ -1701,12 +1742,13 @@ class DataFetcher:
         # 按月排序取最新月（month 格式 "YYYY-MM" 可直接字符串比较）
         if month and month_charge and month_usage:
             sorted_triples = sorted(zip(month, month_usage, month_charge), key=lambda t: t[0])
-            _, month_usage, month_charge = sorted_triples[-1]
+            month_bill_date, month_usage, month_charge = sorted_triples[-1]
         else:
+            month_bill_date = month[-1] if month else None
             month_usage = month[-1] if month else None
             month_charge = month[-1] if month else None
 
-        return balance, last_daily_date, last_daily_usage, yearly_charge, yearly_usage, month_charge, month_usage, tou_data, enhanced_balance, bill_tou_data
+        return balance, last_daily_date, last_daily_usage, yearly_charge, yearly_usage, month_charge, month_usage, month_bill_date, tou_data, enhanced_balance, bill_tou_data
 
     def _get_user_ids(self):
         """获取用户 ID 列表。优先从 el-dropdown 获取（余额页面），
@@ -1915,6 +1957,34 @@ class DataFetcher:
         except Exception as e:
             logging.error(f"月度数据获取失败: {e}")
             return None, None, None
+
+    def _get_month_usage_for_year(self, year: int):
+        """历史回填专用：切换年份下拉抓指定年的月度电费表（常规抓取不走此路径）"""
+        self._click_button(self._page, "xpath=" + "//div[@id='tab-first']")
+        time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+        self._click_button(self._page, ".el-select .el-input__suffix")
+        time.sleep(1)
+        span = self._page.query_selector(f"xpath=//span[text()='{year}']")
+        if not span:
+            logging.error(f"年份 {year} 不在下拉列表中")
+            return []
+        span.click()
+        time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+        rows = self._page.query_selector_all("#pane-first .el-table__body-wrapper tbody tr")
+        out = []
+        for row in rows:
+            try:
+                cells = row.query_selector_all("td")
+                if len(cells) < 3:
+                    continue
+                date_text = cells[0].inner_text().strip()
+                usage_val = re.sub(r'[^\d.]', '', cells[1].inner_text().strip())
+                charge_val = re.sub(r'[^\d.]', '', cells[2].inner_text().strip())
+                if usage_val and charge_val and date_text:
+                    out.append((date_text, float(usage_val), float(charge_val)))
+            except Exception:
+                continue
+        return out
 
     # 增加获取每日用电量的函数
     def _get_daily_usage_data(self):

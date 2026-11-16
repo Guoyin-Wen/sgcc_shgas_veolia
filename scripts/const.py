@@ -16,6 +16,7 @@ API_PATH = "/api/states/"
 
 BALANCE_SENSOR_NAME = "sensor.electricity_charge_balance"
 DAILY_USAGE_SENSOR_NAME = "sensor.last_electricity_usage"
+DAILY_ELE_SENSOR_NAME = "sensor.daily_electricity_usage"
 YEARLY_USAGE_SENSOR_NAME = "sensor.yearly_electricity_usage"
 YEARLY_CHARGE_SENSOR_NAME = "sensor.yearly_electricity_charge"
 MONTH_USAGE_SENSOR_NAME = "sensor.month_electricity_usage"
@@ -34,6 +35,9 @@ USAGE_UNIT_CUBE = "m³"
 SHRQ_BALANCE_SENSOR_NAME = "sensor.gas_last_usage"   # 本期用量 m³
 SHRQ_MONTHLY_USAGE_SENSOR_NAME = "sensor.gas_last_charge"   # 本期费用
 SHRQ_YEARLY_USAGE_SENSOR_NAME = "sensor.gas_yearly_usage"  # 燃气年用量 m³
+SHRQ_METER_READING_SENSOR_NAME = "sensor.gas_meter_reading"   # 二开新增：燃气表读数 m³
+SHRQ_PAY_STATUS_SENSOR_NAME = "sensor.gas_pay_status"          # 二开新增：燃气缴费状态
+SHRQ_NEXT_READ_SENSOR_NAME = "sensor.gas_next_read_date"      # 二开新增：下次抄表日
 
 # 浦东威立雅水费实体定义（二开新增；2026-11-05 pdwly → water 重命名，tap=生活水 sewage=污水）
 PDWLY_MONTHLY_USAGE_TOTAL_SENSOR_NAME = "sensor.last_water_usage_total"   # 本期总用量 m³

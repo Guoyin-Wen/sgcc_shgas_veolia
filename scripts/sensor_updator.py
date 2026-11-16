@@ -367,6 +367,34 @@ class SensorUpdator:
             self.send_url(sensorName, request_body)
             logging.info(f"Home Assistant 传感器 {sensorName} 状态已更新: {value} kWh ({label})")
 
+    def _daily_cum_map(self, postfix: str) -> dict:
+        """读 sqlite daily<uid> 表算逐日累计（date -> 自首条起累计），供统计 sum 列。
+        兜底路径：缓存重推 republish() 不经过 data_fetcher 的 cum 注入，此处直读库保证
+        任何调用路径都能拿到单调连续的累计序列。失败返回 {}（调用方只导 mean）。"""
+        try:
+            import sqlite3
+            db_path = os.path.join(get_data_dir(), os.getenv("DB_NAME", "homeassistant.db"))
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+            try:
+                cum_map = {}
+                for (t,) in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'daily%'").fetchall():
+                    if not t.endswith(postfix.lstrip("_")):
+                        continue
+                    cum = 0.0
+                    for d, u in conn.execute(f"SELECT date, usage FROM {t} ORDER BY date"):
+                        try:
+                            cum = round(cum + float(u), 3)
+                        except (TypeError, ValueError):
+                            continue
+                        cum_map[str(d)[:10]] = cum
+                return cum_map
+            finally:
+                conn.close()
+        except Exception as e:
+            logging.warning(f"daily 累计值读取失败（统计将不带 sum 列）: {e}")
+            return {}
+
     def update_daily_series(self, postfix: str, daily_rows: list):
         """每日用电量趋势（二开新增）：
         1. MQTT 推独立实体（无 state_class → recorder 不生成自动统计）
@@ -417,8 +445,9 @@ class SensorUpdator:
         # import_statistics 一律按 recorder 内部统计处理，实体会因"无 state_class 但有统计"反复告警
         statistic_id = "sgcc:daily_electricity_usage" + postfix
         # sum 列 = 自 sqlite 首条记录起的逐日累计（Energy 面板吃 sum 差值；必须单调连续，不能带年基数，
-        # 否则查询范围首行会出现整条累计的假尖峰）。cum_usage 由 data_fetcher 从 sqlite 全表算出注入；
-        # 缺失时只导 mean 不带 sum，宁可少一列也不导入会跳变的序列
+        # 否则查询范围首行会出现整条累计的假尖峰）。优先用 data_fetcher 注入的 cum_usage，
+        # 缺失时（缓存重推路径）直读 sqlite 兜底；两处都拿不到则只导 mean 不带 sum
+        sqlite_cum = self._daily_cum_map(postfix)
         stats = []
         for r in rows:
             u = float(r["total_usage"])
@@ -427,9 +456,12 @@ class SensorUpdator:
                 "mean": u,
                 "max": u,
             }
-            if r.get("cum_usage") is not None:
-                item["sum"] = float(r["cum_usage"])
-                item["state"] = float(r["cum_usage"])
+            cum = r.get("cum_usage")
+            if cum is None:
+                cum = sqlite_cum.get(str(r["date"])[:10])
+            if cum is not None:
+                item["sum"] = float(cum)
+                item["state"] = float(cum)
             stats.append(item)
         self._import_statistics_ws(statistic_id, stats)
 

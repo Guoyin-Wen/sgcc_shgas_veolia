@@ -413,7 +413,9 @@ class SensorUpdator:
             self.send_url(sensorName, request_body)
 
         # 逐日长期统计导入（幂等：同 start 重复导入同值无害）
-        statistic_id = "sensor.sgcc_shgas_veolia_daily_electricity_usage" + postfix
+        # ⚠️ 2026-11-17 起改用外部统计 id（sgcc:xxx，非实体 ID）：HA 2026.11 对实体 ID 格式的
+        # import_statistics 一律按 recorder 内部统计处理，实体会因"无 state_class 但有统计"反复告警
+        statistic_id = "sgcc:daily_electricity_usage" + postfix
         stats = [{
             "start": f"{r['date']}T00:00:00+08:00",
             "mean": float(r["total_usage"]),
@@ -440,7 +442,11 @@ class SensorUpdator:
                 "has_sum": False,
                 "statistic_id": statistic_id,
                 "unit_of_measurement": "kWh",
-                "source": "recorder",
+                "unit_class": "energy",
+                # source 必须等于 statistic_id 冒号前的域（外部统计 HA 校验规则）
+                "source": statistic_id.split(":")[0],
+                # mean_type=1(ARITHMETIC)：不填会有 deprecation 警告（2026.11 起强制）
+                "mean_type": 1,
                 "name": "每日用电量",
             },
             "stats": stats,

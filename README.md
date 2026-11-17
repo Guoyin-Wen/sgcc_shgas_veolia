@@ -138,8 +138,9 @@ docker compose logs -f
 [INFO] ---- Cookie 有效，跳过登录
 [INFO] ---- [640xxxxxxxxx] 电费余额: 27.66 元
 [INFO] ---- [640xxxxxxxxx] 年度用电量: 1691 度, 年度电费: 758.57 元 (Vue)
-[INFO] ---- 上海燃气：本期用量 45m³，本期费用 156.00 元
-[INFO] ---- 浦东威立雅：本期用水量 12m³，本期费用 58.20 元
+[INFO] ---- 上海燃气登录成功！
+[INFO] ---- 获取用户 640xxxxxxxxx 账单数据成功.
+[INFO] ---- 获取用户 xxxxxxxxx 水费账单数据成功.
 [INFO] ---- Home Assistant 传感器更新完成!
 ```
 

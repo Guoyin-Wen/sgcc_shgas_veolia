@@ -139,8 +139,8 @@ docker compose logs -f
 [INFO] ---- [640xxxxxxxxx] 电费余额: 27.66 元
 [INFO] ---- [640xxxxxxxxx] 年度用电量: 1691 度, 年度电费: 758.57 元 (Vue)
 [INFO] ---- 上海燃气登录成功！
-[INFO] ---- 获取用户 640xxxxxxxxx 账单数据成功.
-[INFO] ---- 获取用户 xxxxxxxxx 水费账单数据成功.
+[INFO] ---- 获取用户 640xxxxxxxxx 2026-10 燃气账单: 用气 45 m³, 费用 156.0 元, 年用量 320 m³.
+[INFO] ---- 获取用户 xxxxxxxxx 2026-10 水费账单: 用水 12 m³ (自来水 8 / 污水 4), 费用 58.2 元.
 [INFO] ---- Home Assistant 传感器更新完成!
 ```
 

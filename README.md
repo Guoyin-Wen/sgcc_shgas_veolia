@@ -1,44 +1,161 @@
-**二开说明：**
-本仓库从 https://github.com/ARC-MX/sgcc_electricity_new.git 二开而来，并定期同步上游。原仓库只有国家电网数据，本仓库在保留上游全部功能的基础上，新增了**上海燃气（SHRQ）**和**浦东威立雅水费（PDWLY）**两个数据源，三个数据源的数据一起推送到 Home Assistant。
+# sgcc_shgas_veolia
 
-### 二开新增环境变量
+**国家电网电费 + 上海燃气 + 浦东威立雅水费，三合一接入 Home Assistant。**
 
-```bash
-## 上海燃气
-SHRQ_PHONE_NUMBER=177xxxxxxxx
-SHRQ_PASSWORD=xxxxxxxx
+| 数据源 | 方式 | 说明 |
+|---|---|---|
+| 🔡 国网电费 | Playwright 自动化 [95598.cn](https://www.95598.cn/osgweb/login)，多模态大模型解算验证码 | 电量/电费/分时电量/余额，除南方电网省份外可用 |
+| 🔥 上海燃气 | 直接调用官方 API，图形验证码本地识别 | 本期用量/费用、年用量、表读数、抄表日 |
+| 💧 浦东威立雅水费 | 直接调用官方 API | 本期用量/费用（自来水/污水）、表读数、近 12 期账单 |
 
-## 浦东威立雅账号ID（多个用列表格式）
-PDWLY_ID=['xxxxxxxxx','yyyyyyyyy']
-```
+三个数据源中，**国网电是主数据源**；上海燃气、浦东威立雅不配置账号时自动跳过（仅用电时无需 `SHRQ_*` / `PDWLY_ID`）。燃气与水费数据源源自 [xudingjun3131/sgcc_shgas_veolia](https://github.com/xudingjun3131/sgcc_shgas_veolia)（该仓库已停止维护，本仓库独立演进）；电费部分每日自动同步上游 [ARC-MX/sgcc_electricity_new](https://github.com/ARC-MX/sgcc_electricity_new)。
 
-### 二开新增 Home Assistant 实体
+## 功能特性
+
+- **三种推送模式**（`PUSH_MODE`）：MQTT discovery（推荐）/ RESTFUL 拉取 / LEGACY 直推（兼容保留）
+- **HA Energy 面板支持**：每日用电长期统计、燃气/水账单摊日统计序列，均通过 WebSocket `recorder/import_statistics` 导入，Energy 面板直接可选
+- **每日用电量趋势实体** + 历史数据一次性回填工具
+- **数据落地**：SQLite（默认）/ MySQL；水/气账单存本地表，支持缓存定时重发（防 HA 重启丢数据）
+- **余额不足通知**：PushPlus / 自定义 URL
+- Docker 一键部署（本地构建），支持 amd64 / arm64
+
+## Home Assistant 实体总览
+
+后缀规则：电实体后缀为 `_{户号后4位}`（如 `sensor.last_electricity_usage_1234`）；水/气在配置了**多个户号**时后缀 `_{完整户号}`，单户号无后缀。
+
+### 国网电费
 
 | 实体 | 说明 |
 |---|---|
-| `sensor.shrq_charge_balance` | 上海燃气 本期消费 |
-| `sensor.last_shrq_usage` | 上海燃气 本期用量 |
-| `sensor.yearly_shrq_usage` | 上海燃气 年用量 |
-| `sensor.last_pdwly_usage_total` / `_water` / `_dirty` | 浦东威立雅 本期用量（总 / 生活水 / 污水，m³）|
-| `sensor.last_pdwly_charge_total` / `_water` / `_dirty` | 浦东威立雅 本期费用（总 / 生活水 / 污水）|
-| `sensor.pdwly_meter_reading` | 浦东威立雅 本期水表读数（attributes 含上期读数、抄表日、下次抄表日、近 12 期历史账单）|
-| `sensor.pdwly_pay_status` | 浦东威立雅 本期缴费状态（attributes 含缴费时间、实收金额）|
+| `sensor.electricity_charge_balance_xxxx` | 电费余额（预付费账户显示余额，后付费显示上月应交电费），元 |
+| `sensor.last_electricity_usage_xxxx` | 最新一天用电量，kWh（attributes 含数据日期） |
+| `sensor.daily_electricity_usage_xxxx` | 每日用电量趋势，state 为最新一日用量，attributes 含分时明细 |
+| `sensor.yearly_electricity_usage_xxxx` / `..._charge_xxxx` | 年度累计用电量 / 电费 |
+| `sensor.month_electricity_usage_xxxx` / `..._charge_xxxx` | 上月用电量 / 上月电费 |
+| `sensor.month_valley_usage_xxxx` / `..._flat_...` / `..._peak_...` / `..._tip_...` | 上月谷 / 平 / 峰 / 尖峰分时电量 |
+| `sensor.prepay_balance_xxxx` | 预付费余额 / 应交金额，元 |
 
-### 数据推送方式（重要）
+### 上海燃气
 
-通过 `PUSH_MODE` 环境变量选择数据进入 Home Assistant 的方式，三种模式：
+| 实体 | 说明 |
+|---|---|
+| `sensor.gas_last_usage` | 本期用量，m³ |
+| `sensor.gas_last_charge` | 本期费用，元 |
+| `sensor.gas_yearly_usage` | 年用量，m³ |
+| `sensor.gas_meter_reading` | 燃气表读数（attributes 含档位量/档位金额/价格） |
+| `sensor.gas_pay_status` | 缴费状态 |
+| `sensor.gas_next_read_date` | 下次抄表日 |
+
+### 浦东威立雅水费
+
+| 实体 | 说明 |
+|---|---|
+| `sensor.last_water_usage_total` / `_tap` / `_sewage` | 本期用水量（总 / 自来水 / 污水），m³ |
+| `sensor.last_water_charge_total` / `_tap` / `_sewage` | 本期费用（总 / 自来水 / 污水处理），元 |
+| `sensor.water_meter_reading` | 本期水表读数（attributes 含上期读数、抄表日、下次抄表日、近 12 期账单） |
+| `sensor.water_pay_status` | 本期缴费状态（attributes 含缴费时间、实收金额） |
+
+### 外部统计序列（Energy 面板数据源，非实体）
+
+| statistic_id | 说明 |
+|---|---|
+| `sgcc:daily_electricity_usage_{后4位}` | 每日用电量，含 mean / max / sum（逐日累计） |
+| `sgcc:gas_usage_{户号}` | 燃气账单用量按天摊分，纯 sum 序列 |
+| `sgcc:water_usage_{户号}` | 水费账单用量按天摊分，纯 sum 序列 |
+
+MQTT discovery 模式下全部实体自动归组到 `sgcc_shgas_veolia` 设备，使用中文友好名，无需任何 YAML。
+
+> 历史环境变量名 `SHRQ_*` / `PDWLY_*` 未随实体重命名（gas/water）而更改，配置时仍使用旧变量名。
+
+## 快速开始
+
+### 0）前置条件
+
+1. **国网账户**：[注册](https://www.95598.cn/osgweb/login)并绑定电表，可手动查询电量。
+2. **多模态 LLM API Key**（仅电费需要，用于自动解算国网登录验证码；燃气验证码为本地识别，水费无验证码）：
+
+   默认使用硅基流动（SiliconFlow）的 `Qwen/Qwen3.5-35B-A3B`，也支持任意 OpenAI 兼容接口。
+
+   - 注册 [硅基流动](https://cloud.siliconflow.cn/i/2JCjsjdB)（邀请码 `2JCjsjdB`，新用户赠 16 元代金券，充值一分钱后可用），在控制台创建 API Key。
+   - 费用：`Qwen3.5-35B-A3B` 输入 ¥0.0004/K tokens，每次验证码解算约 500 token，个人使用几乎免费。
+   - 可换其他多模态模型（`Qwen/Qwen2.5-VL-72B-Instruct` ¥0.004/K、`gpt-4o` ~¥0.015/K、`doubao-seed-2-0-pro` ~¥0.004/K）。
+   - **注意：DeepSeek 全系列（V3/V4/R1）为纯文本模型，无法识别验证码图片。**
+
+3. **HA 长期访问令牌**：HA 个人页 → 安全 → 长期访问令牌。
+4. 上海燃气 / 浦东威立雅账号（按需，不用则不填）。
+
+### 1）部署（本地构建）
+
+```bash
+git clone https://github.com/Guoyin-Wen/sgcc_shgas_veolia.git
+cd sgcc_shgas_veolia
+cp example.env .env
+vim .env   # 按下节说明填写
+docker compose up -d --build
+```
+
+> 弃坑上游遗留镜像 `xudingjun3131/sgcc_shgas_veolia:v1.0` 冻结在旧版，不含 MQTT discovery、长期统计等新功能，不建议使用。
+
+### 2）`.env` 关键配置
+
+完整清单见 [example.env](example.env)，以下为必改项：
+
+```bash
+## 国网登录（主数据源）
+PHONE_NUMBER="138xxxxxxxx"
+PASSWORD="xxxx"
+LLM_API_KEY="sk-xxxxx"           # 电费必填，多模态模型
+# LLM_BASE_URL / LLM_MODEL      # 默认硅基流动 Qwen，可换
+
+## 上海燃气（按需，不填则跳过）
+SHRQ_PHONE_NUMBER=177xxxxxxxx
+SHRQ_PASSWORD=xxxxxxxx
+
+## 浦东威立雅账号ID（按需，不填则跳过；多个用列表格式）
+PDWLY_ID=['xxxxxxxxx','yyyyyyyyy']
+
+## Home Assistant
+HASS_URL="http://localhost:8123/"
+HASS_TOKEN="eyxxxxx"
+
+## 推送模式：MQTT / RESTFUL / LEGACY（详见下节）
+PUSH_MODE=MQTT
+```
+
+其他常用项：`JOB_START_TIME`（每日执行时间，默认 07:00，每天跑两次间隔 12 小时，实际有 ±10 分钟随机延迟）、`DB_TYPE`（SQLITE/NONE/MYSQL）、`DAILY_FETCH_DAYS`（7 或 30）、`PUSH_TYPE`+`BALANCE`（余额不足通知）、`USER_NAMES`（户号友好名）、`DEBUG_MODE`（本机调试）。
+
+### 3）验证
+
+```bash
+docker compose logs -f
+```
+
+运行成功的日志形如：
+
+```text
+[INFO] ---- 程序开始，当前仓库版本为 v1.8.1
+[INFO] ---- 已输入用户名: 138xxxxxxxx
+[INFO] ---- Cookie 有效，跳过登录
+[INFO] ---- [640xxxxxxxxx] 电费余额: 27.66 元
+[INFO] ---- [640xxxxxxxxx] 年度用电量: 1691 度, 年度电费: 758.57 元 (Vue)
+[INFO] ---- 上海燃气：本期用量 45m³，本期费用 156.00 元
+[INFO] ---- 浦东威立雅：本期用水量 12m³，本期费用 58.20 元
+[INFO] ---- Home Assistant 传感器更新完成!
+```
+
+## 数据推送方式（PUSH_MODE）
 
 | 模式 | 原理 | 重启 HA 后 | 长期统计/能源面板 | 推荐度 |
 |---|---|---|---|---|
 | `MQTT` | MQTT discovery 注册正规实体 | retained 消息秒恢复 | ✅ | **推荐** |
 | `RESTFUL` | 本项目暴露只读端点，HA `rest` 集成定时拉取 | 启动即拉取 | ✅ | 推荐（不想装 broker 时） |
-| `LEGACY` | REST API 直推（上游原始方式） | 实体变 unavailable，等待重发 | ❌ | 历史遗留，仅为兼容保留，不推荐 |
+| `LEGACY` | REST API 直推（上游原始方式） | 实体变 unavailable，等待重发 | ❌ | 历史遗留，仅为兼容保留 |
 
-#### 方式一：MQTT（推荐）
+### 方式一：MQTT（推荐）
 
-实体经 HA 官方 MQTT 集成注册：有 unique_id、重启后从 retained 消息恢复、自动进入长期统计、可在 UI 中改名/改图标，且全部实体自动归组到 `SGCC 水电气` 设备下。
+实体经 HA 官方 MQTT 集成注册：有 unique_id、重启后从 retained 消息恢复、自动进入长期统计、可在 UI 中改名/改图标，且全部实体自动归组到 `sgcc_shgas_veolia` 设备下。
 
-1. 部署 broker（任一台内网机器，示例 `docker-compose.yml`）：
+1. 部署 broker（任一台内网机器）：
 
 ```yaml
 services:
@@ -55,7 +172,7 @@ services:
 
 `config/mosquitto.conf`：
 
-```
+```ini
 listener 1883
 allow_anonymous false
 password_file /mosquitto/config/passwd
@@ -75,9 +192,9 @@ MQTT_USER=<用户名>
 MQTT_PASSWORD=<密码>
 ```
 
-3. HA 侧：设置 → 设备与服务 → 添加集成 → 搜索 **MQTT** → 填 broker 地址与账号。添加后 `SGCC 水电气` 设备及全部传感器自动出现，无需任何 YAML。
+3. HA 侧：设置 → 设备与服务 → 添加集成 → 搜索 **MQTT** → 填 broker 地址与账号。添加后设备及全部传感器自动出现，无需任何 YAML。
 
-#### 方式二：RESTFUL（免 broker）
+### 方式二：RESTFUL（免 broker）
 
 本项目内置只读快照端点（`GET http://<本项目IP>:8300/sensors`，端口可用 `STATE_SERVER_PORT` 修改），HA 用官方 `rest` 集成定时拉取。实体由 RESTful platform 注册，同样支持重启恢复与长期统计。
 
@@ -94,632 +211,103 @@ HA `configuration.yaml` 示例（每个需要的传感器一段，`scan_interval
 sensor:
   - platform: rest
     resource: http://<本项目IP>:8300/sensors
-    name: pdwly_charge_total
-    unique_id: pdwly_charge_total
+    name: water_charge_total
+    unique_id: water_charge_total
     unit_of_measurement: "CNY"
     device_class: monetary
     state_class: measurement
-    value_template: "{{ value_json['sensor.last_pdwly_charge_total'].state }}"
-    json_attributes_path: "sensor.last_pdwly_charge_total"
+    value_template: "{{ value_json['sensor.last_water_charge_total'].state }}"
+    json_attributes_path: "sensor.last_water_charge_total"
     json_attributes:
       - attributes
     scan_interval: 900
 ```
 
-#### 方式三：LEGACY（历史遗留，不推荐）
+### 方式三：LEGACY（历史遗留，不推荐）
 
-上游原始方式：直接 `POST /api/states/` 写入，实体为"无主实体"——重启 HA 后 unavailable、不进长期统计、不能在 UI 中管理。仅因向后兼容保留。若必须使用并希望重启后实体可用，参考上游 README 的 trigger template 方案为每个实体配置镜像传感器。
+REST API 直推（上游原始方式），实体为"无主实体"——重启 HA 后 unavailable、不进长期统计、不能在 UI 中管理。仅因向后兼容保留；若必须使用并希望重启后实体可用，参考 [template/configuration.yaml](template/configuration.yaml) 中的 trigger template 镜像传感器样例。
 
+## HA Energy 面板与历史回填
 
-### Home Assistant 展示效果
-
-<p align="center">
-<img src="assets/homeassistant.png"  width=1024 style="margin-right: 70px";/>
-</p>
-
-### Grafana 监控看板
-
-<p align="center">
-<img src="assets/grafana_dashboard.jpg"  width=1024 />
-</p>
-
-grafana 模板文件见 [水费_电费_燃气-1730082076616.json](assets/水费_电费_燃气-1730082076616.json)
-
----
-
-**重要说明：**原作者@renhai-lab 已于2023年10将项目归档，原仓库不再更新。这个版本是在原仓库基础上大幅改动，在此向原作者表达谢意和致敬。验证码识别已经从最开始的在线商业API替换成离线神经网络检测版本，请使用本仓库的同学点个小星星，或者打赏鼓励。
-
-添加微信通知后，我想这基本上就是这个插件的最终形态了，docker镜像压缩到300MB，后续可能只会在网站变动或者出问题才会更新，再次感谢大家的Star。
-
-**注意** 有很多新手都在提交验证码不能识别的相关issue，特在此统一说明：国网每天有登录限制，每天只能登录有限的几次，超过限制验证码识别成功也不会登录成功。因此，诸如[issue47](https://github.com/ARC-MX/sgcc_electricity_new/issues/47),[issue50](https://github.com/ARC-MX/sgcc_electricity_new/issues/50),[issue29](https://github.com/ARC-MX/sgcc_electricity_new/issues/29)这些都是这个问题，以后就不做回复了。
-
-### 入群方式
-
-最近issue太多实在是回复不过来了，特此添加QQ交流群
-通过为项目点star并微信打赏备注QQ名或QQ号等信息，入群会审核这些信息
-[关于创建QQ付费群的说明](https://github.com/ARC-MX/sgcc_electricity_new/issues/78)
-
-### 支付宝&微信 打赏码
-
-<p align="center">
-<img src="assets/Alipay.png"  width=200 style="margin-right: 70px";/>
-<img src="assets/WeiChat.jpg"  width=200 style="margin-right: 70px">
-<img src="assets/QQ_group.jpg"  width=200/" >
-</p>
-
-# ⚡️国家电网电力获取
-
-[![Docker Image CI](https://github.com/ARC-MX/sgcc_electricity_new/actions/workflows/docker-image.yml/badge.svg)](https://github.com/ARC-MX/sgcc_electricity_new/actions/workflows/docker-image.yml)
-[![Image Size](https://img.shields.io/docker/image-size/arcw/sgcc_electricity)](https://hub.docker.com/r/arcw/sgcc_electricity)
-[![Docker Pull](https://img.shields.io/docker/pulls/arcw/sgcc_electricity?color=%2348BB78&logo=docker&label=pulls)](https://hub.docker.com/r/arcw/sgcc_electricity)
-
-<p align="center">
-<img src="assets/image-20230730135540291.png" alt="mini-graph-card" width="400">
-<img src="assets/image-20240514.jpg" alt="mini-graph-card" width="400">
-</p>
-
-## 简介
-
-本应用可以帮助你将国网的电费、用电量数据接入homeassistant，实现实时追踪家庭用电量情况；并且可以将每日用电量保存到数据库，历史有迹可循。具体提供两类数据：
-
-1. 在homeassistant以实体显示：
-
-   | 实体entity_id                          | 说明                                               |
-   | -------------------------------------- | -------------------------------------------------- |
-   | sensor.last_electricity_usage_xxxx     | 最近一天用电量，单位KWH、度。                      |
-   | sensor.electricity_charge_balance_xxxx | 预付费显示电费余额，反之显示上月应交电费，单位元。 |
-   | sensor.yearly_electricity_usage_xxxx   | 今年总用电量，单位KWH、度。                        |
-   | sensor.yearly_electricity_charge_xxxx  | 今年总用电费，单位元。                             |
-   | sensor.month_electricity_usage_xxxx    | 最近一个月用电量，单位KWH、度。                    |
-   | sensor.month_electricity_charge_xxxx   | 上月总用电费，单位元。                             |
-   | sensor.month_valley_usage_xxxx         | 当月谷时用电量，单位KWH、度。                      |
-   | sensor.month_flat_usage_xxxx           | 当月平时用电量，单位KWH、度。                      |
-   | sensor.month_peak_usage_xxxx           | 当月峰时用电量，单位KWH、度。                      |
-   | sensor.month_tip_usage_xxxx            | 当月尖时用电量，单位KWH、度。                      |
-   | sensor.prepay_balance_xxxx             | 预付费余额/应交金额（后付费账户），单位元。        |
-2. 可选，近三十天每日用电量数据（SQLite数据库）
-   数据库表名为 daily+userid ，在项目路径下有个homeassistant.db  的数据库文件就是；
-   如需查询可以用
-
-   ```
-   "SELECT * FROM dailyxxxxxxxx;"
-   ```
-
-   得到如下结果：
-
-<img src="assets/database.png" alt="mini-graph-card" width="400">
-
-## 适用范围
-
-1. 适用于除南方电网覆盖省份外的用户。即除广东、广西、云南、贵州、海南等省份的用户外，均可使用本应用获取电力、电费数据。
-2. 不管是通过哪种哪种安装的homeassistant，只要可以运行python，有约1G硬盘空间和500M运行内存，都可以采用本仓库部署。
-
-本镜像支持架构：
-
-> - `linux/amd64`：适用于 x86-64（amd64）架构的 Linux 系统，例如windows电脑。
-> - `linux/arm64`：适用于 ARMv8 架构的 Linux 系统，例如树莓派3+，N1盒子等。
-> - `linux/armv7`，暂不提供 ARMv7 架构的 Linux 系统，例如树莓派2，玩客云等，主要原因是onnx-runtime没有armv7版本的库，用户可以参考 [https://github.com/nknytk/built-onnxruntime-for-raspberrypi-linux.git](https://github.com/nknytk/built-onnxruntime-for-raspberrypi-linux.git)自行安装库然后编译docker镜像。
-
-## 实现流程
-
-通过 Python 的 **Playwright** 自动化获取国家电网官网的电费电量数据，绕过网站的反爬虫检测。
-
-登录支持两种模式，验证码均由**大模型（LLM）视觉识别**自动解算：
-
-| 登录方式                        | 验证码类型                   | LLM 方案                                | 适用场景 |
-| ------------------------------- | ---------------------------- | --------------------------------------- | -------- |
-| 密码登录                        | 腾讯**图标点击**验证码 | DOM 提取参考图标 + 主图 → 图标匹配定位 | 生产环境 |
-| 短信验证码登录 (`DEBUG_MODE`) | 腾讯**文字顺序**验证码 | 截图 + LLM 读提示文字 → 按顺序点击汉字 | 本机调试 |
-
-Cookie 自动持久化到 `data/sgcc_cookies.json`，下次启动时复用，避免频繁登录触发风控。数据获取优先使用页面 **Vue 状态注入**（一次性提取年度/月度/日分时数据），DOM 方式兜底。获取数据后通过 Home Assistant 的 [REST API](https://developers.home-assistant.io/docs/api/rest/) 将实体状态 POST 更新到 Home Assistant。
-
-# 安装与部署
-
-## 0）获取大模型 API Key（必读）
-
-本项目使用**硅基流动（SiliconFlow）** 的 **Qwen/Qwen3.5-35B-A3B** 多模态大模型自动解算国家电网验证码。支持任意 OpenAI 兼容 API。
-
-### 注册步骤
-
-> **🎁 推荐链接：https://cloud.siliconflow.cn/i/2JCjsjdB（邀请码 `2JCjsjdB`），点击注册即赠 16元代金券（充值一分钱后可使用）！**
-
-<p align="center">
-<img src="assets/share_sf-2JCjsjdB.png" alt="硅基流动注册二维码" width="250">
-</p>
-
-1. 注册 [硅基流动账号](https://cloud.siliconflow.cn/i/2JCjsjdB)：`https://cloud.siliconflow.cn/i/2JCjsjdB`（邀请码 `2JCjsjdB`），新用户赠16元代金券（充值一分钱后可使用）。
-2. 在控制台创建 API Key。
-3. 配置到 `.env` 文件：
-   ```bash
-   LLM_API_KEY="sk-xxxxx"
-   ```
-
-### 费用说明
-
-`Qwen3.5-35B-A3B` 输入仅 **¥0.0004 / K tokens**，每次验证码解算约 500 token，个人使用几乎免费。也可切换其他**多模态模型**：
-
-| 模型                             | 输入价格          | 备注     |
-| -------------------------------- | ----------------- | -------- |
-| `Qwen/Qwen3.5-35B-A3B`         | ¥0.0004/K tokens | 推荐     |
-| `Qwen/Qwen2.5-VL-72B-Instruct` | ¥0.004/K tokens  | 更准确   |
-| `gpt-4o`                       | ~¥0.015/K tokens | OpenAI   |
-| `doubao-seed-2-0-pro`          | ~¥0.004/K tokens | 火山引擎 |
-
-> **注意：DeepSeek 全系列（V3/V4/R1）均为纯文本模型，不支持图片识别，无法用于验证码解算。**
-
-### 我们使用的模型
-
-本项目通过 OpenAI 兼容接口调用 **`Qwen/Qwen3.5-35B-A3B`** 多模态模型，能够准确识别：
-
-- **图标点击验证码**：匹配参考图标到大图网格位置 → 返回点击坐标
-- **文字顺序验证码**：读取提示文字顺序 → 在候选区定位汉字 → 按序点击
-- **滑块验证码**：识别缺口位置 → 计算拖动距离
-
----
-
-## 1）注册国家电网账户
-
-首先要注册国家电网账户，绑定电表，并且可以手动查询电量
-
-注册网址：[https://www.95598.cn/osgweb/login](https://www.95598.cn/osgweb/login)
-
-## 2）获取HA token
-
-  token获取方法参考[https://blog.csdn.net/qq_25886111/article/details/106282492](https://blog.csdn.net/qq_25886111/article/details/106282492)
-
-## 3）docker镜像部署，速度快
-
-1. 安装docker和homeassistant，[Homeassistant极简安装法](https://github.com/renhaiidea/easy-homeassistant)。
-2. 克隆仓库
+- **配置 → 仪表盘 → 能源**：
+  - 家庭用电 → 选统计 `每日用电量 (sgcc:daily_electricity_usage_xxxx)`
+  - 燃气 / 水 → 分别选 `sgcc:gas_usage_{户号}`、`sgcc:water_usage_{户号}`（账单用量按天摊分，末账期后按日均估算，新账单落地自动校正）
+- **历史回填**（把 SQLite 中已有的每日用电历史导入 HA 长期统计，幂等可重复执行）：
 
 ```bash
-git clone https://github.com/ARC-MX/sgcc_electricity_new.git
-# 如果github网络环境不好的话可以使用国内镜像，完全同步的，个人推荐使用国内镜像
-# git clone https://gitee.com/ARC-MX/sgcc_electricity_new.git
-cd sgcc_electricity_new
+docker exec sgcc_shgas_veolia python3 /app/backfill_daily_stats.py
 ```
 
-3. 创建环境变量文件
+## 数据存储与运维
+
+- SQLite 文件默认 `homeassistant.db`（Docker 内 `/data/`，即 compose 挂载的仓库目录），`DB_TYPE=MYSQL` 可切换 MySQL。
+- 每户号一套表：`daily{户号}`（每日用电）、`data{户号}`（电费快照）、`shrq_bill{户号}`（燃气账单）、`pdwly_bill{户号}`（水费账单）。
+- 缓存重发：每 `CACHE_REPUBLISH_INTERVAL` 分钟（默认 60）把缓存数据重推 HA，防止 HA 重启后实体空窗；启动时若有有效缓存则跳过抓取以保护账号。
+- 更新：
 
 ```bash
-cp example.env .env
-vim .env           # 参考以下文件编写.env文件
-```
-
-```bash
-### 以下项都需要修改
-## 国网登录信息
-# 修改为自己的登录账号
-PHONE_NUMBER="xxx" 
-# 修改为自己的登录密码
-PASSWORD="xxxx" 
-# 排除指定用户ID，如果出现一些不想检测的ID或者有些充电、发电帐号、可以使用这个环境变量，如果有多个就用","分隔，","之间不要有空格
-IGNORE_USER_ID=xxxxxxx,xxxxxxx,xxxxxxx
-
-# DB_TYPE 数据储存类型 SQLITE / MYSQL w，默认未NONE 不进行数据储存
-DB_TYPE=NONE
-
-# sqlite 数据库名，默认为homeassistant
-DB_NAME="homeassistant.db"
-# COLLECTION_NAME默认为electricity_daily_usage_{国网用户id}，不支持修改。
-
-# mysql 的数据库配置
-MYSQL_HOST="mysql.lan"
-MYSQL_USER="user"
-MYSQL_PASSWORD="password"
-MYSQL_DATABASE="sgcc"
-MYSQL_PORT=3306
-
-## homeassistant配置
-# 改为你的localhost为你的homeassistant地址
-HASS_URL="http://localhost:8123/" 
-# homeassistant的长期令牌
-HASS_TOKEN="eyxxxxx"
-
-## selenium运行参数
-# 任务开始时间，24小时制，例如"07:00”则为每天早上7点执行，第一次启动程序如果时间晚于早上7点则会立即执行一次，每隔12小时执行一次。
-JOB_START_TIME="07:00"
-# 每次操作等待时间，推荐设定范围为[2,30]，该值表示每次点击网页后所要等待数据加载的时间，如果出现“no such element”诸如此类的错误可适当调大该值，如果硬件性能较好可以适当调小该值
-RETRY_WAIT_TIME_OFFSET_UNIT=15
-
-
-## 记录的天数, 仅支持填写 7 或 30
-# 国网原本可以记录 30 天,现在不开通智能缴费只能查询 7 天造成错误
-DATA_RETENTION_DAYS=7
-
-## PUSH_TYPE 余额不足提醒方式 PUSHPLUS / URLPUSH ，默认为None不通知
-PUSH_TYPE=None
-# 余额提现阈值，通知类型PUSHPLUS / URLPUSH 都生效
-BALANCE=5.0
-# pushplus token 如果有多个就用","分隔，","之间不要有空格，单个就不要有","
-PUSHPLUS_TOKEN=xxxxxxx,xxxxxxx,xxxxxxx
-
-# url_push 地址 通知body {"user_id": user_id, "balance": balance}
-PUSH_URL="http://push.lan/notify"
-
-# 密码登录失败（登录次数过多等）的备选方案
-LOGIN_FALLBACK='qrcode'
-# 二维码的提交地址
-PUSH_QRCODE_URL="http://push.lan/qrcode"
-
-# 二维码扫描后的最多等待时间 = QR_CODE_LOGIN_WAIT_COUNT x QR_CODE_LOGIN_WAIT_TIME_INTERVAL_UNIT
-# 测试发现二维码默认有效期限为60s
-#二维码登录等待次数
-QR_CODE_LOGIN_WAIT_COUNT=30
-#二维码登录等待间隔
-QR_CODE_LOGIN_WAIT_TIME_INTERVAL_UNIT=10
-
-## 浏览器反检测参数（可选，默认值即可正常工作）
-# 浏览器语言
-# BROWSER_LANGUAGE=zh-HK,zh,en-US,en
-# 浏览器窗口尺寸
-# BROWSER_WINDOW_SIZE=1158,848
-# 设备像素比
-# BROWSER_DEVICE_SCALE_FACTOR=2
-# 自定义 User-Agent（留空使用 Chrome 默认）
-# BROWSER_USER_AGENT=
-
-## ONNX Runtime 线程数限制（可选）
-# 在 Docker 中限制了 CPU 数量时，设置此项可消除线程亲和度错误
-# 建议设置为 Docker 分配的 CPU 核心数
-# OP_NUM_THREADS=2
-
-## 大模型验证码识别配置（必填）
-# 默认硅基流动 Qwen 多模态模型（DeepSeek 等纯文本模型不支持图片识别）
-LLM_API_KEY="your-api-key-here"
-LLM_BASE_URL="https://api.siliconflow.cn/v1"
-LLM_MODEL="Qwen/Qwen3.5-35B-A3B"
-
-## 调试模式（可选）
-# 设置为 true 启用调试模式（仅限本机运行，Docker 中无效）：
-#   浏览器窗口可见 — 可观察完整自动化操作过程
-#   短信验证码登录 — 通过弹窗输入短信码，验证码由 LLM 自动解算
-# DEBUG_MODE=false
-
-## 用户名映射（可选）
-# 为每个户号指定友好名称，格式：户号:名称,户号:名称
-# USER_NAMES="1234567890:家庭用电,0987654321:公司用电"
-```
-
-4. 运行
-
-  我已经优化了镜像环境，将镜像的地址配置为阿里云，如果要使用docker hub的源可以将docker-compose.yml中
-  image: registry.cn-hangzhou.aliyuncs.com/arcw/sgcc_electricity:latest 改为 arcw/sgcc_electricity:latest
-
-```bash
-运行获取传感器名称
-docker-compose up -d
-docker-compose logs sgcc_electricity_app
-```
-
-运行成功应该显示如下日志：
-
-```bash
-2026-07-24 07:00:15  [INFO    ] ---- 程序开始，当前仓库版本为1.x.x
-2026-07-24 07:00:15  [INFO    ] ---- 当前登录的用户名为: xxxxxx
-2026-07-24 07:00:16  [INFO    ] ---- Browser ready (standard + stealth)
-2026-07-24 07:00:30  [INFO    ] ---- 已输入用户名: 138xxxxxxxx
-2026-07-24 07:00:45  [INFO    ] ---- Cookie 有效，跳过登录
-2026-07-24 07:00:52  [INFO    ] ---- [640xxxxxxxxx] 电费余额: 27.66 元
-2026-07-24 07:01:05  [INFO    ] ---- [640xxxxxxxxx] 年度用电量: 1691 度, 年度电费: 758.57 元 (Vue)
-2026-07-24 07:01:15  [INFO    ] ---- [640xxxxxxxxx] 2026-07: 用电 169 度, 电费 75.81 元 (Vue)
-2026-07-24 07:01:20  [INFO    ] ---- [640xxxxxxxxx] 最近用电: 2026-07-23 6.56 度 (Vue)
-2026-07-24 07:01:30  [INFO    ] ---- Home Assistant 传感器更新完成!
-2024-06-06 16:01:55  [INFO    ] ---- Get month power charge for xxxxxxx successfully, 01 月 usage is xxx KWh, charge is xxx CNY.
-2024-06-06 16:01:55  [INFO    ] ---- Get month power charge for xxxxxxx successfully, 02 月 usage is xxx KWh, charge is xxx CNY.
-2024-06-06 16:01:55  [INFO    ] ---- Get month power charge for xxxxxxx successfully, 2024-03-01-2024-03-31 usage is xxx KWh, charge is xxx CNY.
-2024-06-06 16:01:55  [INFO    ] ---- Get month power charge for xxxxxxx successfully, 2024-04-01-2024-04-30 usage is xxx KWh, charge is xxx CNY.
-2024-06-06 16:01:59  [INFO    ] ---- Get daily power consumption for xxxxxxx successfully, , 2024-06-05 usage is xxx kwh.
-........
-2024-12-25 13:43:25  [INFO    ] ---- Check the electricity bill balance. When the balance is less than 100.0 CNY, the notification will be sent = True
-2024-12-25 13:43:25  [INFO    ] ---- Homeassistant sensor sensor.electricity_charge_balance_xxxx state updated: 102.3 CNY
-2024-12-25 13:43:25  [INFO    ] ---- Homeassistant sensor sensor.last_electricity_usage_xxxx state updated: 6.56 kWh
-2024-12-25 13:43:25  [INFO    ] ---- Homeassistant sensor sensor.yearly_electricity_usage_xxxx state updated: 1691 kWh
-2024-12-25 13:43:25  [INFO    ] ---- Homeassistant sensor sensor.yearly_electricity_charge_xxxx state updated: 758.57 CNY
-2024-12-25 13:43:25  [INFO    ] ---- Homeassistant sensor sensor.month_electricity_usage_xxxx state updated: 169 kWh
-2024-12-25 13:43:25  [INFO    ] ---- Homeassistant sensor sensor.month_electricity_charge_xxxx state updated: 75.81 CNY
-2024-12-25 13:43:25  [INFO    ] ---- User xxxxxxx state-refresh task run successfully!
-```
-
-**sensor.electricity_charge_balance_xxxx 为余额传感器**
-
-5. 配置configuration.yaml文件, 将下面中的_xxxx 替换为自己log中的_xxxx后缀。
-6. 由于是API方式传递传感器数据，所以要想重启ha实体ID可用，必须配置如下
-
-```yaml
-template:
-  - trigger:
-      - platform: event
-        event_type: state_changed
-        event_data:
-          entity_id: sensor.electricity_charge_balance_xxxx
-    sensor:
-      - name: electricity_charge_balance_xxxx
-        unique_id: electricity_charge_balance_xxxx
-        state: "{{ states('sensor.electricity_charge_balance_xxxx') }}"
-        state_class: measurement
-        unit_of_measurement: "CNY"
-        device_class: monetary
-
-  - trigger:
-      - platform: event
-        event_type: state_changed
-        event_data:
-          entity_id: sensor.last_electricity_usage_xxxx
-    sensor:
-      - name: last_electricity_usage_xxxx
-        unique_id: last_electricity_usage_xxxx
-        state: "{{ states('sensor.last_electricity_usage_xxxx') }}"
-        state_class: measurement
-        unit_of_measurement: "kWh"
-        device_class: energy
-
-  - trigger:
-      - platform: event
-        event_type: state_changed
-        event_data:
-          entity_id: sensor.month_electricity_usage_xxxx
-    sensor:
-      - name: month_electricity_usage_xxxx
-        unique_id: month_electricity_usage_xxxx
-        state: "{{ states('sensor.month_electricity_usage_xxxx') }}"
-        state_class: measurement
-        unit_of_measurement: "kWh"
-        device_class: energy
-
-  - trigger:
-      - platform: event
-        event_type: state_changed
-        event_data:
-          entity_id: sensor.month_electricity_charge_xxxx
-    sensor:
-      - name: month_electricity_charge_xxxx
-        unique_id: month_electricity_charge_xxxx
-        state: "{{ states('sensor.month_electricity_charge_xxxx') }}"
-        state_class: measurement
-        unit_of_measurement: "CNY"
-        device_class: monetary
-
-  - trigger:
-      - platform: event
-        event_type: state_changed
-        event_data:
-          entity_id: sensor.yearly_electricity_usage_xxxx
-    sensor:
-      - name: yearly_electricity_usage_xxxx
-        unique_id: yearly_electricity_usage_xxxx
-        state: "{{ states('sensor.yearly_electricity_usage_xxxx') }}"
-        state_class: total_increasing
-        unit_of_measurement: "kWh"
-        device_class: energy
-
-  - trigger:
-      - platform: event
-        event_type: state_changed
-        event_data:
-          entity_id: sensor.yearly_electricity_charge_xxxx
-    sensor:
-      - name: yearly_electricity_charge_xxxx
-        unique_id: yearly_electricity_charge_xxxx
-        state: "{{ states('sensor.yearly_electricity_charge_xxxx') }}"
-        state_class: total_increasing
-        unit_of_measurement: "CNY"
-        device_class: monetary
-
-  - trigger:
-      - platform: event
-        event_type: state_changed
-        event_data:
-          entity_id: sensor.month_valley_usage_xxxx
-    sensor:
-      - name: month_valley_usage_xxxx
-        unique_id: month_valley_usage_xxxx
-        state: "{{ states('sensor.month_valley_usage_xxxx') }}"
-        state_class: measurement
-        unit_of_measurement: "kWh"
-        device_class: energy
-
-  - trigger:
-      - platform: event
-        event_type: state_changed
-        event_data:
-          entity_id: sensor.month_flat_usage_xxxx
-    sensor:
-      - name: month_flat_usage_xxxx
-        unique_id: month_flat_usage_xxxx
-        state: "{{ states('sensor.month_flat_usage_xxxx') }}"
-        state_class: measurement
-        unit_of_measurement: "kWh"
-        device_class: energy
-
-  - trigger:
-      - platform: event
-        event_type: state_changed
-        event_data:
-          entity_id: sensor.month_peak_usage_xxxx
-    sensor:
-      - name: month_peak_usage_xxxx
-        unique_id: month_peak_usage_xxxx
-        state: "{{ states('sensor.month_peak_usage_xxxx') }}"
-        state_class: measurement
-        unit_of_measurement: "kWh"
-        device_class: energy
-
-  - trigger:
-      - platform: event
-        event_type: state_changed
-        event_data:
-          entity_id: sensor.month_tip_usage_xxxx
-    sensor:
-      - name: month_tip_usage_xxxx
-        unique_id: month_tip_usage_xxxx
-        state: "{{ states('sensor.month_tip_usage_xxxx') }}"
-        state_class: measurement
-        unit_of_measurement: "kWh"
-        device_class: energy
-
-  - trigger:
-      - platform: event
-        event_type: state_changed
-        event_data:
-          entity_id: sensor.prepay_balance_xxxx
-    sensor:
-      - name: prepay_balance_xxxx
-        unique_id: prepay_balance_xxxx
-        state: "{{ states('sensor.prepay_balance_xxxx') }}"
-        state_class: measurement
-        unit_of_measurement: "CNY"
-        device_class: monetary
-```
-
-配置完成后重启HA, 刷新一下HA界面
-
-<img src="assets/restart.jpg" alt="restart.jpg" style="zoom: 50%;" />
-
-6. 更新容器及其代码（需要更新才需要）
-
-```bash
-docker-compose down # 删除容器
-docker-compose pull # 更新镜像
-git pull --tags origin master:master	#更新代码，代码不在容器中，所以要手动更新
-docker-compose up -d # 重新运行
-#如果git 拉取失败可以执行如下命令，重新拉取
-git fetch --all
-git reset --hard origin/master
 git pull
+docker compose up -d --build
 ```
 
-## 4）ha内数据展示
+## 仪表盘参考
 
-<img src="assets/edit1.jpg" alt="edit1.jpg" style="zoom: 50%;" />
+<p align="center">
+<img src="assets/homeassistant.png" alt="Home Assistant 实体展示效果" width=1024 />
+</p>
 
-结合[mini-graph-card](https://github.com/kalkih/mini-graph-card) 和[mushroom](https://github.com/piitaya/lovelace-mushroom)实现美化效果：
+<p align="center">
+<img src="assets/grafana_dashboard.jpg" alt="Grafana 水电燃气监控看板" width=1024 />
+</p>
 
-<img src="assets/Ha-mini-card.jpg" alt="Ha-mini-card.jpg" style="zoom: 50%;" />
-
-将下面中的_xxxx 替换为自己log中的_xxxx后缀。
+Grafana 模板：[水费_电费_燃气.json](assets/水费_电费_燃气-1730082076616.json)；HA 卡片可结合 [mini-graph-card](https://github.com/kalkih/mini-graph-card) 与 [mushroom](https://github.com/piitaya/lovelace-mushroom) 美化，示例：
 
 ```yaml
-type: vertical-stack
-cards:
-  - type: custom:mini-graph-card
-    entities:
-      - entity: sensor.last_electricity_usage_xxxx
-        name: 国网每日用电量
-        aggregate_func: first
-        show_state: true
-        show_points: true
-        icon: mdi:lightning-bolt-outline
-      - entity: sensor.electricity_charge_balance_xxxx
-        name: 电费余额
-        aggregate_func: first
-        show_state: true
-        show_points: true
-        color: "#e74c3c"
-        icon: mdi:cash
-        y_axis: secondary
-    group_by: date
-    hour24: true
-    hours_to_show: 240
-    lower_bound: 0
-    upper_bound: 10
-    lower_bound_secondary: 0
-    upper_bound_secondary: 120
-    show:
-      icon: false
-  - type: horizontal-stack
-    cards:
-      - graph: none
-        type: sensor
-        entity: sensor.month_electricity_charge_xxxx
-        detail: 1
-        name: 上月电费
-        icon: ""
-        unit: 元
-      - graph: none
-        type: sensor
-        entity: sensor.month_electricity_usage_xxxx
-        detail: 1
-        name: 上月用电量
-        unit: 度
-        icon: mdi:lightning-bolt-outline
-  - type: horizontal-stack
-    cards:
-      - animate: true
-        entities:
-          - entity: sensor.yearly_electricity_usage_xxxx
-            name: 今年总用电量
-            aggregate_func: first
-            show_state: true
-            show_points: true
-        group_by: date
-        hour24: true
-        hours_to_show: 240
-        type: custom:mini-graph-card
-      - animate: true
-        entities:
-          - entity: sensor.yearly_electricity_charge_xxxx
-            name: 今年总用电费用
-            aggregate_func: first
-            show_state: true
-            show_points: true
-        group_by: date
-        hour24: true
-        hours_to_show: 240
-        type: custom:mini-graph-card
+type: custom:mini-graph-card
+entities:
+  - entity: sensor.last_electricity_usage_xxxx
+    name: 国网每日用电量
+    aggregate_func: first
+    show_state: true
+    show_points: true
+    icon: mdi:lightning-bolt-outline
+  - entity: sensor.electricity_charge_balance_xxxx
+    name: 电费余额
+    aggregate_func: first
+    show_state: true
+    show_points: true
+    color: "#e74c3c"
+    icon: mdi:cash
+    y_axis: secondary
+group_by: date
+hour24: true
+hours_to_show: 240
+lower_bound: 0
 ```
 
-## 5）电量通知
+（`_xxxx` 替换为自己日志中显示的户号后 4 位。）
 
-  更新电费余额不足提醒，在.env里设置提醒余额。目前我是用[pushplus](https://www.pushplus.plus/)的方案，注册pushplus然后，获取token，通知给谁就让谁注册并将token填到.env中
-  token获取方法参考[https://cloud.tencent.com/developer/article/2139538](https://cloud.tencent.com/developer/article/2139538)
+## 常见问题
 
-# 其他
+- **验证码识别成功但登录失败**：国网每天登录次数有限，超限后当天无法再登录，属正常风控，次日再试。
+- **只能查 7 天日用电量**：未开通智能缴费只能查 7 天（`DAILY_FETCH_DAYS=7`）；开通智能缴费可能使电费从后付费变预付费（欠费即停电），注意风险。
+- **水/气数据没更新**：查看日志中「浦东威立雅水费数据刷新任务失败」/「上海燃气数据刷新任务失败」——两者失败互不影响，也不影响电费抓取。
+- **余额通知**：`PUSH_TYPE=PUSHPLUS` 或 `URLPUSH`，配合 `BALANCE` 阈值与 `PUSHPLUS_TOKEN` / `PUSH_URL`。
 
-> 当前作者：[https://github.com/ARC-MX/sgcc_electricity_new](https://github.com/ARC-MX/sgcc_electricity_new)
->
-> 原作者：[https://github.com/louisslee/sgcc_electricity](https://github.com/louisslee/sgcc_electricity)，原始[README_origin.md](归档/README_origin.md)。
+## 与上游的关系
 
-## 我的自定义部分包括：
+| 部分 | 来源 | 现状 |
+|---|---|---|
+| 国网电费 | [ARC-MX/sgcc_electricity_new](https://github.com/ARC-MX/sgcc_electricity_new) | 上游仍活跃，本仓库经 [GitHub Actions](.github/workflows/auto-merge-upstream.yml) 每日自动合并其 master |
+| 上海燃气 + 浦东威立雅水费 | [xudingjun3131/sgcc_shgas_veolia](https://github.com/xudingjun3131/sgcc_shgas_veolia) | 上游已停止维护，本仓库独立演进 |
 
-增加的部分：
+## 致谢
 
-- 增加近30天每日电量写入数据库（默认mongodb），其他数据库请自行配置。
-  - 添加配置默认增加近 7 天每日电量写入数据, 可修改为 30 天, 因为国网目前[「要签约智能交费才能看到30天的数据，不然就只能看到7天的」](https://github.com/ARC-MX/sgcc_electricity_new/issues/11#issuecomment-2158973048)。【注意：开通智能缴费后电费可能从「后付费」变为「预付费」，也就是「欠费即停电」，习惯了每月定时按账单缴费的需要注意，谨防停电风险】
-- 将间歇执行设置为定时执行: JOB_START_TIME，24小时制，例如"07:00”则为每天早上7点执行，第一次启动程序立即执行一次, 每12小时执行一次
-- 给last_daily_usage增加present_date，用来确定更新的是哪一天的电量。一般查询的日期会晚一到两天。
-- 对configuration.yaml中自定义实体部分修改。
+- [louisslee/sgcc_electricity](https://github.com/louisslee/sgcc_electricity) — 项目起源，国网电费接入的原始实现。
+- [ARC-MX/sgcc_electricity_new](https://github.com/ARC-MX/sgcc_electricity_new) — 国网电费上游：LLM 验证码识别、Vue 状态注入取数、分时电量、Playwright 反检测等大量核心工作均来自该仓库及其社区贡献者。
+- [xudingjun3131/sgcc_shgas_veolia](https://github.com/xudingjun3131/sgcc_shgas_veolia) — 上海燃气与浦东威立雅水费数据源的引入与最初实现。
+- 以及原 README 中提及的所有贡献者（Ami8834671、DuanXDong、renxiaoyaoo 等）。
 
-## 重要修改通知
+## License
 
-* 2024-06-13：SQLite替换MongoDB，原因是python自带SQLite3，不需要额外安装，也不再需要MongoDB镜像。
-* 2024-07-03：新增每天定时执行两次，添加配置默认增加近 7 天每日电量写入数据, 可修改为 30 天。
-* 2024-07-05：新增余额不足提醒功能。
-* 2024-12-10：新增忽略指定用户ID的功能：针对一些用户拥有充电或者发电账户，可以使用 IGNORE_USER_ID 环境变量忽略特定的ID。
-* 2025-01-05：新增Homeassistant Add-on部署方式。
-* 2025-05-01：**重大更新**：验证码识别从 ONNX 升级为**大模型（LLM）视觉识别**。浏览器反检测升级为 **Playwright + CloakBrowser**。
-* 2025-05-20：Playwright + Chrome 反检测标志位方案，全面支持 ARMv6/v7 平台。
-* 2025-07-24：**架构升级**：数据获取优先 Vue 状态注入（一次性提取全部数据），DOM 解析兜底。新增 DEBUG_MODE 短信登录 + 文字顺序验证码 LLM 识别。分时电量传感器优先使用账单数据。移除 Selenium 遗留代码。
-  2025-05-15：新增**分时电量传感器**（谷/平/峰/尖）、**预付费余额传感器**、**应交金额传感器**；支持 Vue 状态直接注入提取数据。
-
-### TO-DO
-
-- [X] 增加离线滑动验证码识别方案 → 已升级为 LLM 视觉方案
-- [X] 添加默认推送服务，电费余额不足提醒
-- [X] 添加Homeassistant Add-on安装方式，在此感谢[Ami8834671](https://github.com/Ami8834671), [DuanXDong](https://github.com/DuanXDong)等小伙伴的idea和贡献
-- [X] 添加大模型（LLM）验证码识别方案（硅基流动 Qwen）
-- [X] 添加 CloakBrowser 反检测浏览器支持
-- [X] 添加 Cookie 持久化机制（data/sgcc_cookies.json）
-- [X] 添加 DEBUG_MODE 短信登录 + 文字顺序验证码 LLM 识别
-- [X] 数据获取优先 Vue 状态注入，DOM 解析兜底
-- [X] 分时电量传感器优先账单数据
-- [ ] 添加 Home Assistant integration
-- [X] 添加分时电量传感器（谷/平/峰/尖）在此感谢[renxiaoyaoo](https://github.com/renxiaoyaoo)的实现思路
-- [X] 添加预付费余额/应交金额传感器
-- [ ] 添加置Homeassistant integration
-
-## **技术交流群**
-
-由于现在用户越来越多，稍有问题大家就在github上发issue，我有点回复不过来了，故创建一个付费加入的QQ群。该群只是方便大家讨论，不承诺技术协助，我想大多数用户参考历史issue和文档都能解决自己的问题
-
-### 再次说明，希望大家通过认真看文档和浏览历史issue解决问题，毕竟收费群不是开源项目的本意。
+[Apache-2.0](LICENSE)，沿用上游协议。

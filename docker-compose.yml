@@ -2,8 +2,9 @@ services:
   sgcc_electricity_app:
     env_file:
       - .env
-    image: xudingjun3131/sgcc_shgas_veolia:v1.0 # for use docker.io: arcw/sgcc_electricity:latest
-    # image: sgcc_electricity_test      # for local test
+    build: .                          # 本地构建，功能与仓库最新代码一致（README 推荐方式）
+    image: sgcc_shgas_veolia:local
+    # image: xudingjun3131/sgcc_shgas_veolia:v1.0  # 弃坑上游冻结镜像，不含 MQTT discovery/长期统计等新功能
     container_name: sgcc_shgas_veolia
     network_mode: "host"
     environment:

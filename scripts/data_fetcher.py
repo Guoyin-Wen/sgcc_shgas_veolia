@@ -1337,7 +1337,7 @@ class DataFetcher:
                         latest_bills[user] = history_tmp[latest]
                         history_bills[user] = history_tmp
                         logging.info(
-                            f"获取用户 {user} 水费账单数据成功.")
+                            f"获取用户 {user} {month_list_tmp[latest]} 水费账单: 用水 {month_usage_total_list_tmp[latest]} m³ (自来水 {month_usage_water_list_tmp[latest]} / 污水 {month_usage_dirty_list_tmp[latest]}), 费用 {month_charge_total_list_tmp[latest]} 元.")
                         attempts = 6
                     else:
                         logging.info(
@@ -1502,7 +1502,7 @@ class DataFetcher:
                                                 month_charge_list.append(month_charge_list_tmp[0])
                                                 month_list.append(month_list_tmp[0])
                                                 logging.info(
-                                                    f"获取用户 {customerId} 账单数据成功.")
+                                                    f"获取用户 {customerId} {month_list_tmp[0]} 燃气账单: 用气 {month_usage_list_tmp[0]} m³, 费用 {month_charge_list_tmp[0]} 元, 年用量 {yearly_usage_list_tmp[0]} m³.")
                                             else:
                                                 logging.error(f"获取用户 {customerId} 账单数据失败,稍后将继续重试")
                                         except Exception as e:

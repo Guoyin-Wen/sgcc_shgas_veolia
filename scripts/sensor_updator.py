@@ -465,9 +465,12 @@ class SensorUpdator:
             stats.append(item)
         self._import_statistics_ws(statistic_id, stats)
 
-    def _import_statistics_ws(self, statistic_id: str, stats: list):
+    def _import_statistics_ws(self, statistic_id: str, stats: list, unit: str = "kWh",
+                              unit_class: str = "energy", name: str = "每日用电量",
+                              has_mean: bool = True):
         """经 HA WebSocket recorder/import_statistics 导入长期统计（二开新增）。
-        优先 HASS_URL，失败回退内网 http://192.168.1.12；仅告警不抛错。"""
+        优先 HASS_URL，失败回退内网 http://192.168.1.12；仅告警不抛错。
+        unit/unit_class/name/has_mean 由调用方按统计类型提供（电 kWh/energy，水气 m³/volume）。"""
         import asyncio
         import re as _re
 
@@ -480,17 +483,17 @@ class SensorUpdator:
             "id": 1,
             "type": "recorder/import_statistics",
             "metadata": {
-                "has_mean": True,
-                # 是否带 sum 列按实际数据决定（Energy 面板依赖 sum 差值；缺 cum 时不硬标）
+                "has_mean": has_mean,
+                # 是否带 sum 列按实际数据决定（Energy 面板依赖 sum 差值；缺数据时不硬标）
                 "has_sum": any("sum" in s for s in stats),
                 "statistic_id": statistic_id,
-                "unit_of_measurement": "kWh",
-                "unit_class": "energy",
+                "unit_of_measurement": unit,
+                "unit_class": unit_class,
                 # source 必须等于 statistic_id 冒号前的域（外部统计 HA 校验规则）
                 "source": statistic_id.split(":")[0],
-                # mean_type=1(ARITHMETIC)：不填会有 deprecation 警告（2026.11 起强制）
-                "mean_type": 1,
-                "name": "每日用电量",
+                # mean_type：has_mean 时 1(ARITHMETIC)，纯 sum 序列 0(NONE)（2026.11 起强制项）
+                "mean_type": 1 if has_mean else 0,
+                "name": name,
             },
             "stats": stats,
         }

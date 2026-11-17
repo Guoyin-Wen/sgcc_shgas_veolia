@@ -1129,6 +1129,72 @@ class DataFetcher:
         except Exception as e:
             logging.error(f"水/气本地账单重发失败: {e}")
 
+        # Energy 面板水/气统计序列维护（独立容错，不随上面失败而跳过）
+        self._import_utility_series(updator)
+
+    def _import_utility_series(self, updator):
+        """二开新增：水/气账单摊日重建外部统计序列（供 HA Energy 面板燃气/水卡片）。
+        表读数实体只在抄表日跳变，做能源源会长期为 0；改为每期账单用量按天摊到账期，
+        末账期后按上期日均估算到当天——新账单落地后下一轮整段重导自动校正。幂等。"""
+        from datetime import date as _date, datetime as _dt, timedelta as _td
+        try:
+            db_path = os.path.join(get_data_dir(), os.getenv("DB_NAME", "homeassistant.db"))
+            if not os.path.exists(db_path):
+                return
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            today = _date.today()
+
+            def _build(reads):
+                """reads: [(read_date, usage)]，返回按日 sum 统计行（自首期起累计，从 0 起算）"""
+                ds = lambda s: _dt.strptime(str(s)[:10], "%Y-%m-%d").date()
+                reads = sorted(reads, key=lambda r: str(r[0]))
+                days_list = []
+                for i, (rd, usage) in enumerate(reads):
+                    end = ds(rd)
+                    start = ds(reads[i - 1][0]) if i > 0 else end - _td(days=60)
+                    n = (end - start).days
+                    if n <= 0:
+                        continue
+                    rate = round(float(usage) / n, 4)
+                    d = start + _td(days=1)
+                    while d <= end:
+                        days_list.append((d, rate))
+                        d += _td(days=1)
+                if days_list:
+                    rate = days_list[-1][1]
+                    d = days_list[-1][0] + _td(days=1)
+                    while d <= today:
+                        days_list.append((d, rate))
+                        d += _td(days=1)
+                stats, cum = [], 0.0
+                for d, u in days_list:
+                    cum = round(cum + u, 3)
+                    stats.append({"start": f"{d.isoformat()}T00:00:00+08:00",
+                                  "sum": cum, "state": cum})
+                return stats
+
+            for t, tag, name, col_date, col_usage in [
+                ("shrq_bill%", "gas", "燃气用量", "readDate", "consumption"),
+                ("pdwly_bill%", "water", "用水量", "copymeterdate", "waternum"),
+            ]:
+                for (tb,) in cur.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?",
+                        (t,)).fetchall():
+                    uid = tb.split("bill")[-1]
+                    reads = cur.execute(
+                        f"SELECT {col_date}, {col_usage} FROM {tb} ORDER BY {col_date}").fetchall()
+                    stats = _build(reads)
+                    if stats:
+                        updator._import_statistics_ws(
+                            f"sgcc:{tag}_usage_{uid}", stats,
+                            unit=USAGE_UNIT_CUBE, unit_class="volume",
+                            name=name, has_mean=False)
+                        logging.info(f"[{uid}] {name}统计序列已导入 {len(stats)} 天")
+            conn.close()
+        except Exception as e:
+            logging.warning(f"水/气统计序列导入失败（不影响其他数据）: {e}")
+
     def _publish_shrq_bill_detail(self, updator, profix: str, bill: dict):
         """二开新增：燃气账单明细推送（表读数/缴费状态/下次抄表日，档位分布挂表读数 attributes；2026-11-09 从 .bak-20261106-billdate 考古恢复，曾被后续 docker cp 覆盖丢失）"""
         try:
